@@ -1,796 +1,601 @@
-# HSM Transparent Load Balancer
-## Implementation, Deployment & Test Guide
+# HSM Transparent Load Balancer — ActiveMQ Artemis Edition
+## Implementation, Deployment & Test Guide (Ubuntu WSL / Docker)
 
-**Project:** `thales-transparent-lb`  
-**Version:** 1.0.0  
-**Date:** 2026-04-25  
-**Owner:** ISC Internal Projects  
-**Classification:** Internal — Restricted  
+**Project:** `thales-artemis-lb`  
+**Forked from:** `thales-transparent-lb` (ActiveMQ Classic)  
+**Broker:** ActiveMQ Artemis 2.38.0 (replaces ActiveMQ Classic 5.18.3)  
+**Date:** 2026-05-04  
+**Classification:** Internal — Restricted
 
 ---
 
 ## Table of Contents
 
-1. [Executive Summary](#1-executive-summary)
+1. [What Changed from Classic](#1-what-changed-from-classic)
 2. [Architecture](#2-architecture)
-3. [Key Design Decisions](#3-key-design-decisions)
-4. [Component Reference](#4-component-reference)
-5. [Installation & Deployment](#5-installation--deployment)
-6. [Configuration Reference](#6-configuration-reference)
-7. [Load Balancing Algorithms](#7-load-balancing-algorithms)
-8. [Test Cases & Validation](#8-test-cases--validation)
-9. [Test Results (Executed 2026-04-25)](#9-test-results-executed-2026-04-25)
-10. [HSM Brand Compatibility](#10-hsm-brand-compatibility)
-11. [Operations & Monitoring](#11-operations--monitoring)
-12. [Troubleshooting](#12-troubleshooting)
+3. [Prerequisites — Ubuntu WSL](#3-prerequisites--ubuntu-wsl)
+4. [Repository Setup](#4-repository-setup)
+5. [Build Artifacts](#5-build-artifacts)
+6. [Docker Stack Deployment](#6-docker-stack-deployment)
+7. [Configuration Reference](#7-configuration-reference)
+8. [Artemis HA — How Shared-Store Works](#8-artemis-ha--how-shared-store-works)
+9. [HSM Tunnel Setup](#9-hsm-tunnel-setup)
+10. [Switching Between Classic and Artemis](#10-switching-between-classic-and-artemis)
+11. [Test Cases & Validation](#11-test-cases--validation)
+12. [Port Reference](#12-port-reference)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
-## 1. Executive Summary
+## 1. What Changed from Classic
 
-`thales-transparent-lb` is a **generic TCP/IP Hardware Security Module (HSM) Load Balancer**. It acts as a transparent proxy between any client application and a pool of N HSM nodes. It does **not** parse, format, or modify HSM commands in any way — raw bytes are forwarded as-is and raw bytes are returned as-is.
-
-**What it solves:**
-- A single HSM node becomes a bottleneck and single point of failure
-- Different applications need access to HSMs without managing connections themselves
-- HSM nodes can be added or removed without changing client applications
-- Unhealthy HSM nodes are automatically bypassed
-
-**Key capabilities:**
-| Capability | Detail |
-|---|---|
-| Protocol | Any TCP/IP binary protocol (Thales, Utimaco, SafeNet, nCipher, etc.) |
-| Framing | 2-byte big-endian length prefix (configurable) |
-| Load balancing | Round Robin, Least Connections, Weighted Round Robin, Random |
-| Health checking | Active probe every 5 seconds using configurable command |
-| Connection pooling | Apache Commons Pool2 — per-node socket pool |
-| JMS integration | ActiveMQ — receives requests, returns replies via correlation ID |
-| Concurrency | 20–100 JMS consumers (configurable) |
-| Status API | REST endpoint: `GET /api/v1/hsm-lb/status` |
+| Item | ActiveMQ Classic | ActiveMQ Artemis |
+|------|-----------------|-----------------|
+| Broker image | `apache/activemq-classic:5.18.3` | `apache/activemq-artemis:2.38.0` |
+| HA mechanism | Shared KahaDB file lock | Shared journal file lock (same concept) |
+| Broker config | `activemq.xml` (Spring XML) | `broker.xml` (Artemis XML) |
+| Protocol to broker | OpenWire TCP | OpenWire TCP (same — no code change) |
+| App connection string | `failover:(tcp://activemq-1:61616,...)` | `failover:(tcp://artemis-master:61616,...)` |
+| Java source changes | — | **None required** |
+| Management console | Classic Web UI :8161 | Artemis Hawtio console :8161 |
 
 ---
 
 ## 2. Architecture
 
-### 2.1 Full Flow Diagram
-
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      CLIENT APPLICATION                         │
-│  (Payment Switch / Auth Engine / Any App)                       │
-└────────────────────────┬────────────────────────────────────────┘
-                         │ TCP/IP (raw HSM commands)
-                         │ Port: 9100
-                         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   EZNET INBOUND ADAPTER                         │
-│                  eznet-tcp2jms.war                              │
-│                                                                 │
-│  • Listens on TCP port 9100                                     │
-│  • Reads 2-byte length-prefixed frames                          │
-│  • Publishes BytesMessage to ActiveMQ                           │
-│  • Sets JMSReplyTo + JMSCorrelationID for response routing      │
-└────────────────────────┬────────────────────────────────────────┘
-                         │ JMS BytesMessage
-                         │ Queue: hsm.transparent.lb.in
-                         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      ACTIVEMQ BROKER                            │
-│                   tcp://127.0.0.1:61616                         │
-└────────────────────────┬────────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              THALES TRANSPARENT LOAD BALANCER                   │
-│                thales-transparent-lb.jar                        │
-│                     Port: 8110 (REST)                           │
-│                                                                 │
-│  ┌──────────────────┐   ┌────────────────────────────────────┐  │
-│  │  JMS Listener    │   │       Load Balancer Core           │  │
-│  │  (20–100 threads)│──▶│  Algorithm: Round Robin /          │  │
-│  │                  │   │  Least Connections /               │  │
-│  │  Consumes from   │   │  Weighted Round Robin /            │  │
-│  │  hsm.transparent │   │  Random                            │  │
-│  │  .lb.in          │   └────────────────┬───────────────────┘  │
-│  └──────────────────┘                    │                      │
-│                                          │ Select healthy node  │
-│  ┌──────────────────┐                    ▼                      │
-│  │  Health Checker  │   ┌────────────────────────────────────┐  │
-│  │  (every 5s)      │   │     Node Registry & Pools          │  │
-│  │  NO / NP command │   │                                    │  │
-│  └──────────────────┘   │  Node 1 Pool (Commons Pool2)       │  │
-│                         │  Node 2 Pool (Commons Pool2)       │  │
-│                         │  Node N Pool (Commons Pool2)       │  │
-│                         └────────────────┬───────────────────┘  │
-└──────────────────────────────────────────┼──────────────────────┘
-                                           │ Raw TCP bytes
-              ┌────────────────────────────┼────────────────────┐
-              ▼                            ▼                    ▼
-    ┌──────────────────┐       ┌──────────────────┐   ┌──────────────────┐
-    │   HSM Node 1     │       │   HSM Node 2     │   │   HSM Node N     │
-    │ 127.0.0.1:7004   │       │ 10.9.x.x:1500    │   │ 10.9.x.x:1500    │
-    │ (tunnel/test)    │       │ (Thales/any)     │   │ (any brand)      │
-    └──────────────────┘       └──────────────────┘   └──────────────────┘
+  Client App
+      │
+      ▼
+┌───────────┐   TCP    ┌─────────────────────────────┐
+│  EZNet-1  │◄────────►│                             │
+│  :9100    │  OpenWire│   Artemis Master :61616      │
+└───────────┘◄────────►│   (holds journal file lock) │
+                        │                             │
+┌───────────┐  OpenWire│   Artemis Slave  :61616      │
+│  EZNet-2  │◄────────►│   (waits — promotes on       │
+│  :9101    │          │    master failure)           │
+└───────────┘          └─────────────────────────────┘
+                                    │ JMS (OpenWire)
+                 ┌──────────────────┴──────────────────┐
+                 ▼                                       ▼
+          ┌──────────┐                           ┌──────────┐
+          │   LB-1   │                           │   LB-2   │
+          │  :8110   │                           │  :8111   │
+          └──────────┘                           └──────────┘
+               │ TCP tunnel                           │ TCP tunnel
+     ┌─────────┼──────────┐              ┌────────────┼──────────┐
+     ▼         ▼          ▼              ▼            ▼          ▼
+  HSM-1     HSM-2      HSM-3          HSM-1        HSM-2      HSM-3
+:9998     :10001     :10002          :9998        :10001     :10002
 ```
 
-### 2.2 Reply Flow
-
-```
-HSM Node → socket response → LB Pool → JMS reply (correlation ID) 
-→ ActiveMQ → EzNet Inbound → TCP reply → Client Application
-```
+**Message flow:**
+1. Client sends TCP frame → EZNet (tcp2jms bridge)
+2. EZNet wraps frame → JMS message → `hsm.transparent.lb.in` queue on Artemis
+3. LB-1 or LB-2 dequeues, forwards to HSM node via TCP tunnel
+4. HSM replies → LB sends JMS reply to `hsm.transparent.lb.reply` with correlation ID
+5. EZNet matches correlation ID → returns response TCP frame to client
 
 ---
 
-## 3. Key Design Decisions
+## 3. Prerequisites — Ubuntu WSL
 
-| Decision | Choice | Reason |
-|---|---|---|
-| Command passthrough | No parsing | Works with any HSM brand, any command type |
-| JMS framing | 2-byte big-endian length prefix | Matches Thales payShield standard framing |
-| Socket pooling | Apache Commons Pool2 | Industry standard, proven at high TPS |
-| Health check | Active TCP probe with NO/NP command | Detects node failure within 5 seconds |
-| Reply routing | JMS correlation ID + ReplyTo | EzNet handles this natively; no custom code needed |
-| Transport direction | JMS inbound only; LB owns outbound sockets | Simpler than double-EzNet; LB controls pooling |
-| ActiveMQ for inbound | Decouples clients from HSM availability | SAF behaviour — if all HSMs are down, JMS queues |
-
----
-
-## 4. Component Reference
-
-### 4.1 Components and Ports
-
-| Component | Binary | Port | Purpose |
-|---|---|---|---|
-| EzNet Inbound | `eznet-tcp2jms.war` | **9100** (TCP) / 8120 (HTTP) | Receives TCP commands from client apps |
-| ActiveMQ Broker | (existing) | **61616** (OpenWire) | JMS transport |
-| HSM Load Balancer | `thales-transparent-lb.jar` | **8110** (REST status) | Core LB logic |
-| HSM Node 1 (test) | Thales payShield | **7004** (SSH tunnel) | Test HSM node |
-
-### 4.2 JMS Queues
-
-| Queue | Direction | Purpose |
-|---|---|---|
-| `hsm.transparent.lb.in` | Client → LB | Inbound HSM command requests |
-| `hsm.transparent.lb.reply` | LB → Client | Replies routed via EzNet |
-| `hsm.transparent.lb.control` | Admin | Future use (dynamic node registration) |
-
-### 4.3 Source Code Structure
-
-```
-thales-transparent-lb/
-├── pom.xml
-├── src/main/java/com/isc/hsm/transparentlb/
-│   ├── ThalesTransparentLbApplication.java     Main entry point
-│   ├── config/
-│   │   └── LbProperties.java                  All config (Spring @ConfigurationProperties)
-│   ├── node/
-│   │   ├── ThalesNode.java                    Node model (health, counters, weight)
-│   │   ├── ThalesNodePool.java                Commons Pool2 socket pool per node
-│   │   ├── ThalesSocketFactory.java           Pool2 factory — creates/validates sockets
-│   │   └── ThalesNodeRegistry.java            Registry of all node pools
-│   ├── health/
-│   │   └── NodeHealthChecker.java             Scheduled probe every 5s
-│   ├── lb/
-│   │   ├── LoadBalancer.java                  Interface
-│   │   ├── RoundRobinLb.java                  Algorithm: Round Robin
-│   │   ├── LeastConnectionsLb.java            Algorithm: Least Connections
-│   │   ├── WeightedRoundRobinLb.java          Algorithm: Weighted Round Robin
-│   │   ├── RandomLb.java                      Algorithm: Random
-│   │   └── LoadBalancerSelector.java          Picks active algorithm from config
-│   ├── jms/
-│   │   ├── HsmRequestListener.java            JMS consumer — drives passthrough
-│   │   └── JmsConfig.java                     Listener container wiring
-│   └── handler/
-│       ├── PassthroughHandler.java            Core: selects node, sends bytes, returns bytes
-│       └── StatusController.java             REST: GET /api/v1/hsm-lb/status
-├── deploy/
-│   ├── eznet-inbound/config/
-│   │   └── application.properties             EzNet inbound config
-│   ├── supervisor/
-│   │   └── thales-lb.conf                     supervisord config
-│   └── deploy.sh                              One-command deploy script
-└── src/main/resources/
-    └── application.properties                 LB config (nodes, algorithm, pool)
-```
-
----
-
-## 5. Installation & Deployment
-
-### 5.1 Prerequisites
-
-| Item | Requirement |
-|---|---|
-| Java | Temurin JDK 25 (`/usr/lib/jvm/temurin-25-jdk-arm64/`) |
-| ActiveMQ | Running on `127.0.0.1:61616` |
-| EzNet WAR | `/home/xenticate/bank_deploy/bin/eznet/eznet-tcp2jms.war` |
-| Network | Outbound TCP from this server to each HSM node |
-| Supervisor | `supervisord` running |
-
-### 5.2 Build
+### 3.1 Install Docker
 
 ```bash
-cd /home/xenticate/thales-transparent-lb
+# Update packages
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+
+# Add Docker GPG key
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# Add Docker repo
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# Add your user to docker group (no sudo needed)
+sudo usermod -aG docker $USER
+newgrp docker
+
+# Verify
+docker --version
+docker compose version
+```
+
+### 3.2 Install Java 21+ (for building the LB app)
+
+```bash
+sudo apt-get install -y openjdk-21-jdk
+java -version
+```
+
+### 3.3 Install Maven
+
+```bash
+sudo apt-get install -y maven
+mvn -version
+```
+
+### 3.4 WSL-specific: enable systemd (optional but recommended)
+
+Add to `/etc/wsl.conf`:
+```ini
+[boot]
+systemd=true
+```
+Then restart WSL from Windows PowerShell:
+```powershell
+wsl --shutdown
+```
+
+---
+
+## 4. Repository Setup
+
+```bash
+# Clone Artemis fork
+git clone https://github.com/bhaskar2285/Generic-TCP-IP-HSM-Artemis-LB.git thales-artemis-lb
+cd thales-artemis-lb
+```
+
+Directory structure:
+```
+thales-artemis-lb/
+├── src/                          ← Java source (LB app)
+├── pom.xml
+├── docker/
+│   ├── docker-compose.yml        ← main Artemis stack
+│   ├── artemis/
+│   │   ├── broker-master.xml     ← Artemis HA master config
+│   │   ├── broker-slave.xml      ← Artemis HA slave config
+│   │   ├── Dockerfile-master     ← (reference only)
+│   │   └── Dockerfile-slave      ← (reference only)
+│   ├── lb/
+│   │   └── Dockerfile
+│   ├── eznet/
+│   │   ├── Dockerfile
+│   │   └── eznet-tcp2jms.war     ← EZNet binary (pre-built)
+│   └── config/
+│       ├── lb-1/application.properties
+│       ├── lb-2/application.properties
+│       ├── eznet-1/application.properties
+│       └── eznet-2/application.properties
+└── IMPLEMENTATION_AND_TEST_GUIDE.md
+```
+
+---
+
+## 5. Build Artifacts
+
+### 5.1 Build the LB application JAR
+
+```bash
+cd thales-artemis-lb
 mvn clean package -DskipTests
 # Output: target/thales-transparent-lb.jar
 ```
 
-### 5.3 Deploy (One Command)
+### 5.2 Copy artifacts to Docker context
 
 ```bash
-bash /home/xenticate/thales-transparent-lb/deploy/deploy.sh
-```
+cp target/thales-transparent-lb.jar docker/lb/thales-transparent-lb.jar
 
-This script:
-1. Creates `/data1/xenticate/hsm-lb/` directories
-2. Copies LB jar and EzNet WAR to `/data1/xenticate/hsm-lb/bin/`
-3. Copies config files to `/data1/xenticate/hsm-lb/config/` and `eznet-inbound/config/`
-4. Installs supervisor config to `/etc/supervisor/conf.d/thales-lb.conf`
-5. Runs `supervisorctl reread && update`
-
-### 5.4 Manual Start (for testing)
-
-```bash
-# Start LB only (no EzNet, for JMS-direct testing)
-/usr/lib/jvm/temurin-25-jdk-arm64/bin/java \
-  -jar /home/xenticate/thales-transparent-lb/target/thales-transparent-lb.jar
-
-# With external config file
-/usr/lib/jvm/temurin-25-jdk-arm64/bin/java \
-  -jar target/thales-transparent-lb.jar \
-  --spring.config.location=/data1/xenticate/hsm-lb/config/application.properties
-```
-
-### 5.5 Verify Running
-
-```bash
-# Check processes
-supervisorctl status thales-lb thales-lb-inbound
-
-# Check LB health via REST
-curl http://localhost:8110/api/v1/hsm-lb/status
-
-# Check logs
-tail -f /var/log/xenticate/thales-lb.log
+# eznet-tcp2jms.war is already in docker/eznet/ (committed in repo)
+# If you have a newer WAR:
+# cp /path/to/eznet-tcp2jms.war docker/eznet/eznet-tcp2jms.war
 ```
 
 ---
 
-## 6. Configuration Reference
+## 6. Docker Stack Deployment
 
-### 6.1 LB Application Config (`application.properties`)
+### 6.1 Configure HSM nodes
 
+Edit both LB config files to set your HSM node IPs and tunnel ports:
+
+```bash
+nano docker/config/lb-1/application.properties
+nano docker/config/lb-2/application.properties
+```
+
+Change this line:
 ```properties
-# HTTP port for REST status API
-server.port=8110
-
-# ActiveMQ connection
-spring.activemq.broker-url=failover:(tcp://127.0.0.1:61616)
-
-# JMS queue names
-hsm.lb.queue.inbound=hsm.transparent.lb.in
-hsm.lb.queue.control=hsm.transparent.lb.control
-
-# JMS listener concurrency (tune for TPS)
-hsm.lb.jms.concurrent-consumers=20
-hsm.lb.jms.max-concurrent-consumers=100
-
-# Load balancing algorithm
-# Options: ROUND_ROBIN | LEAST_CONNECTIONS | WEIGHTED_ROUND_ROBIN | RANDOM
-hsm.lb.algorithm=ROUND_ROBIN
-
-# Health check interval
-hsm.lb.health.interval-ms=5000
-# NO command hex (Thales standard health check)
-hsm.lb.health.command-hex=0008303030304e4f3030
-
-# Socket pool settings (applied per node)
-hsm.lb.pool.max-total=20          # max sockets per node
-hsm.lb.pool.min-idle=2            # warm sockets kept ready
-hsm.lb.pool.max-wait-ms=3000      # wait for socket from pool
-hsm.lb.pool.socket-timeout-ms=10000
-hsm.lb.pool.connect-timeout-ms=3000
-
-# Node list: id:host:port:weight (comma separated)
-# Add as many nodes as needed
-hsm.lb.nodes=node1:127.0.0.1:7004:1
-# Multi-node example:
-# hsm.lb.nodes=node1:10.9.224.33:1500:1,node2:10.9.224.34:1500:1,node3:10.9.224.35:1500:2
+# Format: name:ip:port:weight
+hsm.lb.nodes=node1:172.18.0.1:9998:1,node2:172.18.0.1:10001:1,node3:172.18.0.1:10002:1
 ```
 
-### 6.2 EzNet Inbound Config
+> In WSL, `172.18.0.1` is the Docker bridge gateway — it reaches services
+> bound to localhost on the WSL host (e.g. SSH tunnels).
 
-```properties
-server.port=8120
-tcp2jms.tcp.serializer.header-size=2      # 2-byte length prefix
-tcp2jms.tcp.local.port=9100               # TCP port clients connect to
-tcp2jms.jms.connection.broker-url=failover:(tcp://127.0.0.1:61616)
-tcp2jms.jms.destination.self=hsm-transparent-lb-inbound
-tcp2jms.jms.destination.inbound=hsm.transparent.lb.in
-tcp2jms.jms.destination.outbound=hsm.transparent.lb.reply
-tcp2jms.jms.listener.inbound-request.concurrent-consumers=20
-tcp2jms.jms.listener.inbound-request.max-concurrent-consumers=100
-```
-
----
-
-## 7. Load Balancing Algorithms
-
-### 7.1 Overview
-
-| Algorithm | Property Value | How It Works | Best Used When |
-|---|---|---|---|
-| Round Robin | `ROUND_ROBIN` | Sends request 1 to node1, request 2 to node2, request 3 to node3, then repeats | All nodes have equal capability; most common choice |
-| Least Connections | `LEAST_CONNECTIONS` | Always picks the node with fewest active socket connections right now | Requests vary in processing time; avoids piling up on a busy node |
-| Weighted Round Robin | `WEIGHTED_ROUND_ROBIN` | Node weight = how many requests it gets per cycle | Nodes have different hardware capacity (e.g. node3 is twice as fast) |
-| Random | `RANDOM` | Picks any healthy node at random | Simple spread; good for stateless equal-capacity nodes |
-
-### 7.2 Weight Explained (Weighted Round Robin Only)
-
-Weight defines what share of total requests a node receives.
-
-**Example config:**
-```properties
-hsm.lb.nodes=node1:10.9.224.33:1500:1,node2:10.9.224.34:1500:2,node3:10.9.224.35:1500:1
-```
-
-Expanded rotation list: `[node1, node2, node2, node3]`  
-Traffic split: node1=25%, node2=50%, node3=25%
-
-Weight has no effect in ROUND_ROBIN, LEAST_CONNECTIONS, or RANDOM modes.
-
-### 7.3 Changing Algorithm at Runtime
-
-Edit `application.properties`, change `hsm.lb.algorithm`, then:
-```bash
-supervisorctl restart thales-lb
-```
-
----
-
-## 8. Test Cases & Validation
-
-### Prerequisites for All Tests
+### 6.2 Build Docker images
 
 ```bash
-# Verify ActiveMQ is running
-nc -z 127.0.0.1 61616 && echo "ActiveMQ UP"
-
-# Verify Thales tunnel is up on port 7004
-bash /data1/xenticate/hsm/tryhsm3.sh
-
-# Verify LB is running and at least one node is healthy
-curl http://localhost:8110/api/v1/hsm-lb/status
-# Expected: "healthyNodes": 1 (or more)
+cd docker
+docker compose build
 ```
 
-### Test Classpath Setup
+### 6.3 Start the stack
 
 ```bash
-JMS_JAR=/home/xenticate/.m2/repository/jakarta/jms/jakarta.jms-api/3.1.0/jakarta.jms-api-3.1.0.jar
-AMQ_ALL=/home/xenticate/dumps/apache-activemq-6.2.2/activemq-all-6.2.2.jar
-LOG4J="/home/xenticate/dumps/apache-activemq-6.2.2/lib/optional/log4j-api-2.25.3.jar:\
-/home/xenticate/dumps/apache-activemq-6.2.2/lib/optional/log4j-core-2.25.3.jar:\
-/home/xenticate/dumps/apache-activemq-6.2.2/lib/optional/log4j-slf4j2-impl-2.25.3.jar"
-TESTCP="/tmp:$JMS_JAR:$AMQ_ALL:$LOG4J"
+docker compose up -d
 ```
 
----
-
-### TC-001: Direct Socket Health Check
-
-**Purpose:** Verify the Thales tunnel port 7004 is accepting connections and responding.  
-**Tool:** `nc` (netcat)  
-**Command:**
-```bash
-bash /data1/xenticate/hsm/tryhsm3.sh
-```
-
-**Request bytes (hex):** `0008 3030 3030 4E4F 3030`  
-**Frame breakdown:**
-
-| Bytes | Hex | ASCII | Description |
-|---|---|---|---|
-| 1-2 | `00 08` | — | Length prefix = 8 bytes |
-| 3-6 | `30 30 30 30` | `0000` | Message Header |
-| 7-8 | `4E 4F` | `NO` | Command Code: Random Number |
-| 9-10 | `30 30` | `00` | Parameters |
-
-**Expected Response:**
-
-| Bytes | Hex | ASCII | Description |
-|---|---|---|---|
-| 1-2 | `00 1A` | — | Length prefix = 26 bytes |
-| 3-6 | `30 30 30 30` | `0000` | Message Header |
-| 7-8 | `4E 50` | `NP` | Response Code (NO→NP) |
-| 9-10 | `30 30` | `00` | Error Code 00 = Success |
-| 11-26 | varies | random data | Generated random number |
-
-**Pass Criteria:** Response contains `4E31 3030` (N100) or `4E50 3030` (NP00) with 2-byte length > 0.
-
----
-
-### TC-002: NO Command via JMS Load Balancer (3 attempts, max 3)
-
-**Purpose:** Verify end-to-end flow: JMS → LB → HSM → reply.  
-**Test data:**
-
-| Field | Value |
-|---|---|
-| Queue | `hsm.transparent.lb.in` |
-| Command | `NO` — Random Number |
-| Request hex | `0008303030304E4F3030` |
-| Expected response prefix | `....0000NP00` |
-| Error code position | bytes 9-10 of response body |
-| Max retries | 3 |
-
-**Manual test steps:**
-```bash
-# 1. Compile test
-javac -cp "$JMS_JAR:$AMQ_ALL" /tmp/TestAllAlgorithms.java -d /tmp
-
-# 2. Run
-java -cp "$TESTCP" TestAllAlgorithms
-```
-
-**Expected output per attempt:**
-```
-Request: 0008303030304E4F3030
-Response hex: 001A303030304E50303033313634313530302D303032343139313030
-Response text: ..0000NP0031641500-002419100
-PASS
-```
-
----
-
-### TC-003: L0 Command — Generate HMAC Secret Key (3 attempts, max 3)
-
-**Purpose:** Verify LB transparently passes a real HSM command and returns a real HSM response.
-
-**Request frame breakdown:**
-
-| Field | ASCII | Hex | Bytes |
-|---|---|---|---|
-| TCP/IP Length Header | — | `0010` | 2 |
-| Message Header | `ISC1` | `49 53 43 31` | 4 |
-| Command Code | `L0` | `4C 30` | 2 |
-| Hash Identifier | `06` (SHA-256) | `30 36` | 2 |
-| HMAC Key Usage | `03` (Gen+Verify) | `30 33` | 2 |
-| HMAC Key Length | `0020` (32 bytes) | `30 30 32 30` | 4 |
-| HMAC Key Format | `00` (Thales format) | `30 30` | 2 |
-| **Total body** | | | **16 bytes = 0x0010** |
-
-**Full request hex:**
-```
-0010 49534331 4C30 3036 3033 30303230 3030
-```
-Written as single string: `0010495343314C303036303330303230 3030`
-
-**Expected response breakdown (L1 — Generate HMAC Secret Key Response):**
-
-| Field | ASCII | Hex | Description |
-|---|---|---|---|
-| TCP/IP Length | — | `002C` (44 bytes) | Response body length |
-| Message Header | `ISC1` | `49534331` | |
-| Command Code | `L1` | `4C31` | Response to L0 |
-| Error Code | `00` | `3030` | No error |
-| HMAC Key Length | `0032` | `30303332` | 50 hex chars = 25 bytes key block |
-| HMAC Key | (binary) | varies | Encrypted HMAC key block |
-
-**Reference response from your test data:**
-```
-TCP/IP Header: *[002C] 44 Bytes
-Message Header: [ISC1]
-Command Code:   [L1] Generate an HMAC Secret Key Response
-Error Code:     [00] No error
-HMAC Key Length:[0032]
-HMAC Key:      *[8A3FF59073096419C36687668E3B0BE0EA253F03EC607D0D87A24422CA96E31E]B2
-```
-
-**Pass criteria:** Error code bytes 9-10 of response = `00`.  
-Each call returns a **different HMAC key** (cryptographically random — this is correct and expected).
-
----
-
-### TC-004: Round Robin Algorithm Verification
-
-**Purpose:** With 2+ nodes, verify requests are distributed evenly.  
-**Setup:** Add a second node to config:
-```properties
-hsm.lb.nodes=node1:127.0.0.1:7004:1,node2:127.0.0.1:7004:1
-```
-(Same physical HSM, two logical entries — for testing only)
-
-**Expected:** With 4 requests, node1 gets 2, node2 gets 2.  
-**Verify via:** `curl http://localhost:8110/api/v1/hsm-lb/status` — check `totalRequests` per node.
-
----
-
-### TC-005: Least Connections Algorithm
-
-**Set algorithm:**
-```properties
-hsm.lb.algorithm=LEAST_CONNECTIONS
-```
-
-**Purpose:** Verify LB routes to node with fewer active connections.  
-**Expected:** Under concurrent load, requests spread across nodes based on active count, not fixed rotation.  
-**Verify via:** Status API `activeConnections` field while under load.
-
----
-
-### TC-006: Weighted Round Robin
-
-**Set config:**
-```properties
-hsm.lb.algorithm=WEIGHTED_ROUND_ROBIN
-hsm.lb.nodes=node1:127.0.0.1:7004:1,node2:127.0.0.1:7004:3
-```
-
-**Expected distribution for 8 requests:**
-- node1: 2 requests (weight 1 out of 4 = 25%)
-- node2: 6 requests (weight 3 out of 4 = 75%)
-
-**Verify:** Status API `totalRequests` ratio ≈ 1:3.
-
----
-
-### TC-007: Node Failure & Recovery
-
-**Purpose:** Verify LB marks unhealthy node, routes only to healthy nodes.
-
-**Steps:**
-1. Start LB with 2 nodes configured
-2. Block port of node2: `iptables -A OUTPUT -p tcp --dport <node2port> -j DROP`
-3. Wait 10 seconds (2 health check cycles)
-4. Check status: `healthyNodes` should drop to 1
-5. Send 5 requests — all should succeed via node1
-6. Unblock port: `iptables -D OUTPUT -p tcp --dport <node2port> -j DROP`
-7. Wait 10 seconds — node2 should come back healthy
-
-**Pass criteria:** No requests fail during node2 outage; all route to node1.
-
----
-
-### TC-008: Connection Pool Reuse Under Burst Load
-
-**Purpose:** Verify socket pool is reused, not creating a new socket per request.
-
-**Command:**
-```bash
-# Send 5 rapid NO commands and check idleConnections > 0 after
-for i in {1..5}; do
-  # (use test script or JMS client)
-done
-curl http://localhost:8110/api/v1/hsm-lb/status
-# Expected: idleConnections >= 1 (sockets returned to pool)
-```
-
-**Pass criteria:** `totalErrors: 0` and `idleConnections >= 1` after burst.
-
----
-
-### TC-009: Status API Validation
+### 6.4 Verify all containers running
 
 ```bash
-curl -s http://localhost:8110/api/v1/hsm-lb/status | python3 -m json.tool
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 ```
 
-**Expected response structure:**
-```json
-{
-  "algorithm": "ROUND_ROBIN",
-  "totalNodes": 1,
-  "healthyNodes": 1,
-  "nodes": [
-    {
-      "id": "node1",
-      "host": "127.0.0.1",
-      "port": 7004,
-      "weight": 1,
-      "healthy": true,
-      "activeConnections": 0,
-      "idleConnections": 1,
-      "totalRequests": 12,
-      "totalErrors": 0,
-      "lastHealthCheckMs": 1777093893290
-    }
-  ]
-}
+Expected after ~30 seconds:
+```
+artemis-master   Up X seconds (healthy)   ...0.0.0.0:61626->61616/tcp, 0.0.0.0:18163->8161/tcp
+artemis-slave    Up X seconds             ...0.0.0.0:61627->61616/tcp, 0.0.0.0:18164->8161/tcp
+lb-1             Up X seconds (healthy)   0.0.0.0:8110->8110/tcp
+lb-2             Up X seconds (healthy)   0.0.0.0:8111->8111/tcp
+eznet-1          Up X seconds             0.0.0.0:9100->9100/tcp, 0.0.0.0:8120->8120/tcp
+eznet-2          Up X seconds             0.0.0.0:9101->9100/tcp, 0.0.0.0:8121->8121/tcp
 ```
 
-**Pass criteria:** HTTP 200, JSON valid, `healthyNodes >= 1`.
-
----
-
-## 9. Test Results (Executed 2026-04-25)
-
-All tests executed against Thales payShield tunnel on `127.0.0.1:7004`.
-
-### TC-001 — Direct Socket Health Check
-**PASS**
-```
-Status: HSM Online (Response Code 00: Success)
-Raw response: 001a303030304e50303033313634313530302d303032343139313030
-```
-
-### TC-002 — NO Command via JMS LB (3/3)
-**PASS**
-
-| Attempt | Request | Response | Error Code | Result |
-|---|---|---|---|---|
-| 1 | `0008303030304E4F3030` | `001A303030304E503030...` | 00 | PASS |
-| 2 | `0008303030304E4F3030` | `001A303030304E503030...` | 00 | PASS |
-| 3 | `0008303030304E4F3030` | `001A303030304E503030...` | 00 | PASS |
-
-### TC-003 — L0 Generate HMAC Secret Key (3/3)
-**PASS** — Each response carries a different random HMAC key (correct behaviour)
-
-| Attempt | Error Code | HMAC Key (hex, truncated) | Result |
-|---|---|---|---|
-| 1 | 00 | `C0B210D52E3B5D6D77A652CC44C4E369846C5967...` | PASS |
-| 2 | 00 | `19A93BEDD48273A4D6E3614287DA258D0AF295262...` | PASS |
-| 3 | 00 | `850B626D8233A558AD7834D3D0215BB2A11668...` | PASS |
-
-**Note:** The HMAC key is different each time — this is correct. The HSM generates a new random key on each L0 call.
-
-### TC-008 — Burst Pool Reuse (5/5)
-**PASS**
-```
-5/5 passed in 1662ms
-idleConnections: 1  (socket returned to pool, not destroyed)
-totalErrors: 0
-```
-
-### Final LB Status After All Tests
-```json
-{
-  "algorithm": "ROUND_ROBIN",
-  "totalNodes": 1,
-  "healthyNodes": 1,
-  "totalRequests": 12,
-  "totalErrors": 0,
-  "idleConnections": 1,
-  "healthy": true
-}
-```
-
----
-
-## 10. HSM Brand Compatibility
-
-**This load balancer works with any HSM that uses a TCP/IP socket with a length-prefixed binary protocol.**
-
-| HSM Brand / Model | Protocol | Compatible? | Notes |
-|---|---|---|---|
-| Thales payShield 10K | Proprietary TCP, 2-byte length | **YES** (tested) | Default config matches |
-| Thales payShield 9000 | Proprietary TCP, 2-byte length | **YES** | Same protocol |
-| Thales Luna Network HSM | NTLS/TCP | YES | May need custom length prefix size |
-| Utimaco SecurityServer | TCP binary | YES | Configure header-size accordingly |
-| SafeNet (Gemalto) ProtectServer | TCP binary | YES | Adjust framing if needed |
-| nCipher (Entrust) nShield | TCP binary | YES | Adjust framing if needed |
-| AWS CloudHSM (on-prem PKCS#11) | TCP via PKCS#11 client | Not applicable | Uses library, not raw socket |
-| SoftHSM2 | Custom TCP | YES | Useful for testing |
-
-**Why it's brand-agnostic:**
-
-The LB does exactly three things with your HSM command bytes:
-1. Read them from the JMS `BytesMessage`
-2. Write them to the selected HSM node's socket as-is
-3. Read the response bytes back (using the 2-byte length prefix to know when response is complete)
-
-It never inspects or modifies the payload. The only thing that must match your HSM is the **framing** — how many bytes the length prefix uses. This is controlled by `tcp2jms.tcp.serializer.header-size` in the EzNet config. Most HSMs use 2 bytes; some use 4 bytes.
-
-**To connect a different HSM brand:**
-1. Set `hsm.lb.nodes=nodeX:hsm-host:hsm-port:1` for each node
-2. Set the correct `health-command-hex` for that brand's status probe
-3. Adjust `header-size` in EzNet config to match framing (2 or 4 bytes)
-4. That's it — no code changes
-
-### 10.1 Quick-Reference: Connecting Any HSM Brand
-
-> **This load balancer is 100% brand-agnostic.**
->
-> It only does three things with HSM bytes:
-> 1. **Read** raw bytes from JMS (what the client sent)
-> 2. **Write** them to the selected HSM node's socket — unchanged, no modification
-> 3. **Read** the response bytes back using the length prefix to know when the message is complete
->
-> To switch or add a different brand (Utimaco, SafeNet, nCipher, Luna):
-> - Change `hsm.lb.nodes` to point to the new `host:port`
-> - Change `health-command-hex` to that brand's status probe command
-> - Adjust `header-size=2` (EzNet config) if the brand uses 4-byte length framing instead of 2-byte
->
-> No code changes. No recompile. Restart LB only.
-
-### 10.2 Per-Brand Configuration Cheat Sheet
-
-| HSM Brand | health-command-hex | header-size | Notes |
-|---|---|---|---|
-| Thales payShield 10K / 9000 | `0008303030304e4f3030` | `2` | Tested — default config |
-| Thales payShield (ISC1 header) | `0006495343314e4f` | `2` | If using ISC1 message header |
-| Utimaco SecurityServer | Vendor-specific PING | `4` | Check Utimaco admin guide |
-| SafeNet ProtectServer | Vendor-specific | `2` or `4` | Check SafeNet docs |
-| nCipher nShield | Vendor-specific | `4` | nShield uses 4-byte header |
-| Luna Network HSM | Vendor-specific | `2` | Confirm with Thales Luna docs |
-| SoftHSM2 (test) | Same as payShield | `2` | Use for dev/test environments |
-
-**If you do not know the health probe command for your HSM brand**, set `health-command-hex` to empty and the health checker will use a TCP connect-only probe (just verifying the port is open). The LB will mark the node healthy if the TCP connection succeeds, without sending any bytes.
-
----
-
-## 11. Operations & Monitoring
-
-### Starting / Stopping
+### 6.5 Check LB health
 
 ```bash
-# Start both components
-supervisorctl start thales-lb-inbound thales-lb
-
-# Stop
-supervisorctl stop thales-lb thales-lb-inbound
-
-# Restart LB only (e.g. after config change)
-supervisorctl restart thales-lb
-
-# Status
-supervisorctl status thales-lb thales-lb-inbound
+curl http://localhost:8110/actuator/health
+curl http://localhost:8111/actuator/health
 ```
 
-### Log Files
+Both must return `"status": "UP"` with `"jms": { "status": "UP" }`.
 
-| Log | Path | Contains |
-|---|---|---|
-| LB application | `/var/log/xenticate/thales-lb.log` | All LB events, routing decisions, errors |
-| LB stderr | `/var/log/xenticate/thales-lb-err.log` | JVM errors |
-| EzNet inbound | `/var/log/xenticate/thales-lb-inbound.log` | TCP connections, JMS publish |
+### 6.6 Artemis web console
 
-### Monitoring Commands
+- Master: http://localhost:18163
+- Slave:  http://localhost:18164
+- Login: `artemis` / `artemis`
+
+### 6.7 Stop the stack
 
 ```bash
-# Live request counters
-watch -n 2 'curl -s http://localhost:8110/api/v1/hsm-lb/status | python3 -m json.tool'
-
-# Check active connections in pool
-curl -s http://localhost:8110/api/v1/hsm-lb/status | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-for n in d['nodes']:
-    print(f'{n[\"id\"]}: healthy={n[\"healthy\"]} active={n[\"activeConnections\"]} idle={n[\"idleConnections\"]} req={n[\"totalRequests\"]} err={n[\"totalErrors\"]}')
-"
-
-# Tail logs for live events
-tail -f /var/log/xenticate/thales-lb.log | grep -E "Routing|replied|health|ERROR"
+docker compose down
 ```
 
-### Adding a New HSM Node (no restart needed for next restart)
+---
 
-1. Edit `/data1/xenticate/hsm-lb/config/application.properties`
-2. Add to `hsm.lb.nodes`:
-   ```properties
-   hsm.lb.nodes=node1:127.0.0.1:7004:1,node2:10.9.224.33:1500:1
-   ```
-3. `supervisorctl restart thales-lb`
-4. Health checker will probe node2 within 5 seconds and mark it healthy
+## 7. Configuration Reference
+
+### 7.1 LB application (`docker/config/lb-1/application.properties`)
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `server.port` | `8110` | LB HTTP management port |
+| `spring.activemq.broker-url` | `failover:(tcp://artemis-master:61616,tcp://artemis-slave:61616)?...` | Artemis OpenWire failover URL |
+| `hsm.lb.nodes` | `node1:172.18.0.1:9998:1,...` | HSM nodes — `name:ip:port:weight` |
+| `hsm.lb.algorithm` | `ROUND_ROBIN` | `ROUND_ROBIN`, `LEAST_CONNECTIONS`, `WEIGHTED_ROUND_ROBIN`, `RANDOM` |
+| `hsm.lb.instance-id` | `lb-1` | Instance ID shown in status/metrics |
+| `hsm.lb.jms.concurrent-consumers` | `10` | Min JMS consumers |
+| `hsm.lb.jms.max-concurrent-consumers` | `50` | Max JMS consumers |
+| `hsm.lb.health.interval-ms` | `10000` | HSM health probe interval (ms) |
+| `hsm.lb.health.command-hex` | `0008303030304e4f3030` | HSM NO command in hex |
+| `hsm.lb.pool.max-total` | `1` | Max sockets per HSM node |
+| `hsm.lb.pool.socket-timeout-ms` | `8000` | Socket read timeout |
+| `hsm.lb.circuit-breaker.failure-threshold` | `3` | Failures before circuit opens |
+| `hsm.lb.circuit-breaker.reset-ms` | `20000` | Circuit breaker reset time |
+
+### 7.2 EZNet application (`docker/config/eznet-1/application.properties`)
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `server.port` | `8120` | EZNet HTTP management port |
+| `tcp2jms.tcp.local.port` | `9100` | TCP inbound port (clients connect here) |
+| `tcp2jms.jms.connection.broker-url` | `failover:(tcp://artemis-master:61616,...)` | Artemis connection |
+| `tcp2jms.jms.destination.outbound` | `hsm.transparent.lb.in` | Queue: client → LB |
+| `tcp2jms.jms.destination.inbound` | `hsm.transparent.lb.reply` | Queue: LB → client |
+| `tcp2jms.jms.destination.self` | `hsm-transparent-lb-inbound-1` | Per-instance reply queue |
+
+### 7.3 Artemis broker (`docker/artemis/broker-master.xml`)
+
+Key config blocks:
+```xml
+<!-- HA: master holds file lock on shared volume -->
+<ha-policy>
+  <shared-store>
+    <master>
+      <failover-on-shutdown>false</failover-on-shutdown>
+    </master>
+  </shared-store>
+</ha-policy>
+
+<!-- OpenWire acceptor — same protocol as Classic, no app code change -->
+<acceptor name="openwire">tcp://0.0.0.0:61616?protocols=OPENWIRE</acceptor>
+
+<!-- Shared data dirs — mounted as Docker volume -->
+<journal-directory>/var/lib/artemis-instance/data/journal</journal-directory>
+<bindings-directory>/var/lib/artemis-instance/data/bindings</bindings-directory>
+<large-messages-directory>/var/lib/artemis-instance/data/large-messages</large-messages-directory>
+<paging-directory>/var/lib/artemis-instance/data/paging</paging-directory>
+```
 
 ---
 
-## 12. Troubleshooting
+## 8. Artemis HA — How Shared-Store Works
 
-| Symptom | Likely Cause | Fix |
-|---|---|---|
-| `healthyNodes: 0` | All HSM tunnels/connections down | Check tunnel, verify `nc -z <host> <port>` works |
-| `totalErrors > 0` | Socket timeout or HSM rejecting commands | Check HSM logs; increase `pool.socket-timeout-ms` |
-| No JMS replies | EzNet not running or wrong queue name | `supervisorctl status thales-lb-inbound`; check queue names match |
-| LB won't start | ActiveMQ not running | `supervisorctl start unit.activemq` |
-| `NoClassDefFoundError` at startup | Wrong Java version | Confirm `java -version` is Temurin 25 |
-| Requests piling up in queue | All nodes unhealthy | Check `healthyNodes` in status; LB falls back to all nodes on startup |
-| Response is 2 zero bytes `0000` | LB received error from HSM passthrough | Check HSM node is accepting connections; check command framing |
+```
+  artemis-master                        artemis-slave
+  ──────────────                        ─────────────
+  starts first
+  acquires file lock ◄─── shared ───►  waits on file lock
+  accepts connections      volume       standby (no connections)
+         │
+         │  master stopped / crashes
+         ▼
+  releases file lock
+                                        acquires file lock
+                                        accepts connections
+                                        ← failover complete (~5–15s)
+```
+
+**Client reconnection:** `failover:` URL in both LB and EZNet configs automatically tries `artemis-slave:61616` when master disappears. No manual intervention needed.
+
+**Data safety:** Zero message loss — slave has the complete journal on the shared volume.
+
+**Failback:** When master restarts it re-acquires the lock from slave (slave reverts to standby).
 
 ---
 
-*Document prepared: 2026-04-25*  
-*Owner: ISC Internal Projects*  
-*Tested on: Thales payShield tunnel, 127.0.0.1:7004*  
-*Total test requests executed: 12 | Errors: 0*
+## 9. HSM Tunnel Setup
+
+HSM nodes are physical Thales payShield devices accessed via SSH tunnels. In WSL, tunnels are typically established on the Windows host and forwarded into WSL via the Docker bridge.
+
+### 9.1 Start SSH tunnels (run in WSL or Windows)
+
+```bash
+# Tunnel to HSM node 1
+ssh -L 0.0.0.0:9998:10.9.226.181:1500 -N -f user@jump-host
+
+# Tunnel to HSM node 2
+ssh -L 0.0.0.0:10001:10.9.226.182:1500 -N -f user@jump-host
+
+# Tunnel to HSM node 3
+ssh -L 0.0.0.0:10002:10.9.226.183:1500 -N -f user@jump-host
+```
+
+> `-L 0.0.0.0:PORT:...` binds all interfaces so Docker containers can reach it via `172.18.0.1`.
+> Without `0.0.0.0`, the tunnel binds only to `127.0.0.1` and containers cannot connect.
+
+### 9.2 Verify tunnel reachability from WSL
+
+```bash
+nc -zv 172.18.0.1 9998  && echo "HSM node1 OK"
+nc -zv 172.18.0.1 10001 && echo "HSM node2 OK"
+nc -zv 172.18.0.1 10002 && echo "HSM node3 OK"
+```
+
+### 9.3 Verify LB sees HSM nodes as healthy
+
+```bash
+curl -s http://localhost:8110/actuator/health | grep -A3 '"hsm"'
+# or check LB logs:
+docker logs lb-1 2>&1 | grep -i "health\|node\|UP\|DOWN" | tail -20
+```
+
+---
+
+## 10. Switching Between Classic and Artemis
+
+### Stop Artemis, start Classic
+
+```bash
+cd thales-artemis-lb/docker
+docker compose down
+
+cd ../../thales-transparent-lb/docker
+docker compose up -d
+```
+
+### Stop Classic, start Artemis
+
+```bash
+cd thales-transparent-lb/docker
+docker compose down
+
+cd ../../thales-artemis-lb/docker
+docker compose up -d
+```
+
+### Run both simultaneously
+
+They use different broker ports but **same LB/EZNet ports** — only run one at a time on the same host unless you edit the LB/EZNet host ports.
+
+| Service | Classic | Artemis |
+|---------|---------|---------|
+| Broker OpenWire (host) | 61618 / 61619 | 61626 / 61627 |
+| Broker Web UI | 18161 / 18162 | 18163 / 18164 |
+| LB-1 | 8110 | 8110 |
+| LB-2 | 8111 | 8111 |
+| EZNet-1 TCP | 9100 | 9100 |
+| EZNet-2 TCP | 9101 | 9101 |
+
+---
+
+## 11. Test Cases & Validation
+
+Test scripts are in the `HSMTHALES1.0/` directory of the main project.
+
+### 11.1 Basic connectivity — manual
+
+```bash
+python3 - <<'EOF'
+import socket, struct
+
+HOST, PORT = "127.0.0.1", 9100
+cmd = bytes.fromhex("303030304e4f3030")
+frame = struct.pack(">H", len(cmd)) + cmd
+
+s = socket.socket()
+s.settimeout(10)
+s.connect((HOST, PORT))
+s.sendall(frame)
+resp_len = struct.unpack(">H", s.recv(2))[0]
+resp = s.recv(resp_len)
+print(f"Response ({len(resp)} bytes): {resp.hex()}")
+s.close()
+EOF
+```
+
+Expected: response contains `4e503030` (NP00 = NO command success).
+
+### 11.2 Load test — 60 requests at 20 TPS
+
+```bash
+bash test-hsm-load.sh
+```
+
+Expected:
+```
+Sent    : 60
+Success : 60
+Failure : 0
+Mismatch: 0
+Success rate: 100.0%
+```
+
+### 11.3 Dual LB benchmark
+
+```bash
+bash test-hsm-dual-lb-benchmark.sh
+```
+
+Expected:
+- Phase 1 (max TPS sweep): 5 TPS at 100%
+- Phase 2 (dual LB load): 100% success rate
+- Phase 3 (lb-1 failover → lb-2): 100%
+
+### 11.4 Artemis master failover test
+
+```bash
+# Terminal 1 — watch LB health
+watch -n2 'curl -s http://localhost:8110/actuator/health | python3 -m json.tool'
+
+# Terminal 2 — stop master
+docker stop artemis-master
+# Wait ~10 seconds — slave promotes, LBs reconnect
+# Health should return to UP
+
+# Restore master
+docker start artemis-master
+```
+
+### 11.5 Validate queues in Artemis console
+
+1. Open http://localhost:18163
+2. Login: `artemis` / `artemis`
+3. Navigate: **Artemis → Queues**
+4. Confirm these queues exist after first message:
+   - `hsm.transparent.lb.in`
+   - `hsm.transparent.lb.reply`
+   - `hsm-transparent-lb-inbound-1`
+   - `hsm-transparent-lb-inbound-2`
+   - `xenticate.control`
+
+---
+
+## 12. Port Reference
+
+| Container | Container port | Host port | Purpose |
+|-----------|---------------|-----------|---------|
+| artemis-master | 61616 | **61626** | OpenWire JMS |
+| artemis-master | 8161 | **18163** | Hawtio web console |
+| artemis-slave | 61616 | **61627** | OpenWire (standby) |
+| artemis-slave | 8161 | **18164** | Hawtio web console |
+| lb-1 | 8110 | 8110 | Health / Prometheus metrics |
+| lb-2 | 8111 | 8111 | Health / Prometheus metrics |
+| eznet-1 | 9100 | 9100 | TCP client inbound |
+| eznet-1 | 8120 | 8120 | HTTP management |
+| eznet-2 | 9100 | 9101 | TCP client inbound |
+| eznet-2 | 8121 | 8121 | HTTP management |
+
+---
+
+## 13. Troubleshooting
+
+### artemis-master unhealthy / fails to start
+
+**Symptom:** `dependency failed to start: container artemis-master is unhealthy`
+
+**Cause:** Corrupt `docker_artemis-data` volume from a previous failed start.
+
+**Fix:**
+```bash
+docker rm -f artemis-master artemis-slave
+docker volume rm docker_artemis-data
+docker compose up -d
+```
+
+### JMS DOWN on LB health check
+
+**Symptom:** `"jms": { "status": "DOWN" }`
+
+**Cause:** LB started before Artemis was ready, or Artemis restarted.
+
+**Fix:**
+```bash
+docker restart lb-1 lb-2
+```
+
+### Port already in use on startup
+
+**Symptom:** `failed to bind host port: address already in use`
+
+**Cause:** Classic stack still running, or previous containers not cleaned up.
+
+**Fix:**
+```bash
+# Stop Classic stack
+docker compose -f /path/to/thales-transparent-lb/docker/docker-compose.yml down
+
+# Or kill specific container
+docker rm -f artemis-master
+```
+
+### SSH tunnel not reachable from containers
+
+**Symptom:** `nc -zv 172.18.0.1 9998` fails from WSL.
+
+**Cause:** SSH tunnel bound to `127.0.0.1` only (default).
+
+**Fix:** Restart tunnel with explicit bind address:
+```bash
+ssh -L 0.0.0.0:9998:10.9.226.181:1500 -N -f user@jump-host
+```
+
+Also check WSL firewall — Windows Firewall may block the port:
+```powershell
+# Run in Windows PowerShell as Admin
+New-NetFirewallRule -DisplayName "WSL HSM Tunnel" -Direction Inbound -LocalPort 9998,10001,10002 -Protocol TCP -Action Allow
+```
+
+### Artemis slave never promotes
+
+**Symptom:** After stopping master, slave stays in standby indefinitely.
+
+**Diagnosis:**
+```bash
+docker logs artemis-slave 2>&1 | tail -20
+# Should show: "Waiting to become live..."
+# Then after master stops: "live"
+```
+
+**Fix:** Ensure master container is fully stopped (not just paused):
+```bash
+docker stop artemis-master   # graceful stop releases lock
+# NOT: docker kill artemis-master  (may not release lock cleanly)
+```
