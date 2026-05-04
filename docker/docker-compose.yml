@@ -3,7 +3,7 @@ networks:
     driver: bridge
 
 volumes:
-  artemis-data:        # shared store — master holds file lock, slave waits
+  artemis-data:        # shared journal — master holds file lock, slave waits
   lb1-logs:
   lb2-logs:
   eznet1-logs:
@@ -12,26 +12,30 @@ volumes:
 services:
 
   # ── Artemis Master ────────────────────────────────────────────────────────
+  # Instance created at /var/lib/ by docker-run.sh on first boot.
+  # etc-override/ files are copied into etc/ after instance creation.
   artemis-master:
     image: apache/activemq-artemis:2.38.0
     container_name: artemis-master
     hostname: artemis-master
     networks: [hsm-net]
     ports:
-      - "61616:61616"
-      - "8161:8161"
+      - "61626:61616"
+      - "18163:8161"
+    user: root
     volumes:
       - artemis-data:/var/lib/artemis-instance/data
-      - ./artemis/broker-master.xml:/var/lib/artemis-instance/etc/broker.xml:ro
+      - ./artemis/broker-master.xml:/var/lib/artemis-instance/etc-override/broker.xml:ro
     environment:
       ARTEMIS_USER: artemis
       ARTEMIS_PASSWORD: artemis
+      ANONYMOUS_LOGIN: "true"
     healthcheck:
       test: ["CMD-SHELL", "grep -q 'F0B0' /proc/net/tcp6 2>/dev/null || grep -q 'F0B0' /proc/net/tcp 2>/dev/null"]
       interval: 5s
       timeout: 3s
       retries: 20
-      start_period: 20s
+      start_period: 30s
     restart: unless-stopped
 
   # ── Artemis Slave (backup) ────────────────────────────────────────────────
@@ -42,14 +46,16 @@ services:
     hostname: artemis-slave
     networks: [hsm-net]
     ports:
-      - "61617:61616"
-      - "8162:8161"
+      - "61627:61616"
+      - "18164:8161"
+    user: root
     volumes:
       - artemis-data:/var/lib/artemis-instance/data
-      - ./artemis/broker-slave.xml:/var/lib/artemis-instance/etc/broker.xml:ro
+      - ./artemis/broker-slave.xml:/var/lib/artemis-instance/etc-override/broker.xml:ro
     environment:
       ARTEMIS_USER: artemis
       ARTEMIS_PASSWORD: artemis
+      ANONYMOUS_LOGIN: "true"
     depends_on:
       artemis-master:
         condition: service_healthy

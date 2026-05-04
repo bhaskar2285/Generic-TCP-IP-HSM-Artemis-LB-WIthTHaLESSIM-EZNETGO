@@ -1,0 +1,20 @@
+FROM apache/activemq-artemis:2.38.0
+
+USER root
+
+RUN /var/lib/artemis/bin/artemis create /var/lib/artemis-instance \
+      --user artemis \
+      --password artemis \
+      --allow-anonymous \
+      --no-autotune \
+      --data /var/lib/artemis-instance/data \
+      --silent
+
+COPY broker-slave.xml /var/lib/artemis-instance/etc/broker.xml
+
+RUN chown -R artemis:artemis /var/lib/artemis-instance
+
+USER artemis
+VOLUME /var/lib/artemis-instance/data
+EXPOSE 61616 8161
+CMD ["/var/lib/artemis-instance/bin/artemis", "run"]
