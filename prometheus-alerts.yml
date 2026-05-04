@@ -1,0 +1,60 @@
+groups:
+  - name: hsm_lb
+    rules:
+
+      - alert: HsmNodeDown
+        expr: hsm_lb_node_healthy{} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "HSM node {{ $labels.node }} is unhealthy"
+          description: "Node {{ $labels.node }} has been unhealthy for >30s. Check SSH tunnel or HSM process."
+
+      - alert: HsmCircuitOpen
+        expr: hsm_lb_node_circuit_open{} == 1
+        for: 10s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker OPEN on {{ $labels.node }}"
+          description: "Node {{ $labels.node }} circuit is open — consecutive errors exceeded threshold. Will auto-reset after reset-ms."
+
+      - alert: HsmAllNodesDown
+        expr: sum(hsm_lb_node_healthy) == 0
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "ALL HSM nodes are unhealthy"
+          description: "No HSM nodes available. All requests will fail. Immediate action required."
+
+      - alert: HsmHighErrorRate
+        expr: |
+          rate(hsm_lb_requests_total{result="error"}[2m])
+          /
+          rate(hsm_lb_requests_total[2m]) > 0.10
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HSM error rate >10% on {{ $labels.node }}"
+          description: "Node {{ $labels.node }} error rate is {{ $value | humanizePercentage }} over last 2m."
+
+      - alert: HsmConsumerScaledDown
+        expr: hsm_lb_jms_max_consumers < 20
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "JMS consumers scaled down (max={{ $value }})"
+          description: "ConcurrencyManager reduced max consumers due to node failures. Throughput is throttled."
+
+      - alert: HsmRequestsExhausted
+        expr: rate(hsm_lb_requests_total{result="exhausted"}[2m]) > 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "HSM requests exhausting all nodes"
+          description: "Requests are failing after trying all nodes. Check all HSM nodes and circuit breakers."

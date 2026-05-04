@@ -1,0 +1,144 @@
+networks:
+  hsm-net:
+    driver: bridge
+
+volumes:
+  artemis-data:        # shared store — master holds file lock, slave waits
+  lb1-logs:
+  lb2-logs:
+  eznet1-logs:
+  eznet2-logs:
+
+services:
+
+  # ── Artemis Master ────────────────────────────────────────────────────────
+  artemis-master:
+    image: apache/activemq-artemis:2.38.0
+    container_name: artemis-master
+    hostname: artemis-master
+    networks: [hsm-net]
+    ports:
+      - "61616:61616"
+      - "8161:8161"
+    volumes:
+      - artemis-data:/var/lib/artemis-instance/data
+      - ./artemis/broker-master.xml:/var/lib/artemis-instance/etc/broker.xml:ro
+    environment:
+      ARTEMIS_USER: artemis
+      ARTEMIS_PASSWORD: artemis
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q 'F0B0' /proc/net/tcp6 2>/dev/null || grep -q 'F0B0' /proc/net/tcp 2>/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Artemis Slave (backup) ────────────────────────────────────────────────
+  # Blocks on shared journal lock. Promotes automatically when master dies.
+  artemis-slave:
+    image: apache/activemq-artemis:2.38.0
+    container_name: artemis-slave
+    hostname: artemis-slave
+    networks: [hsm-net]
+    ports:
+      - "61617:61616"
+      - "8162:8161"
+    volumes:
+      - artemis-data:/var/lib/artemis-instance/data
+      - ./artemis/broker-slave.xml:/var/lib/artemis-instance/etc/broker.xml:ro
+    environment:
+      ARTEMIS_USER: artemis
+      ARTEMIS_PASSWORD: artemis
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── LB-1 ─────────────────────────────────────────────────────────────────
+  lb-1:
+    build:
+      context: ./lb
+      dockerfile: Dockerfile
+    image: hsm-thales-lb:latest
+    container_name: lb-1
+    hostname: lb-1
+    networks: [hsm-net]
+    ports:
+      - "8110:8110"
+    volumes:
+      - ./config/lb-1/application.properties:/config/application.properties:ro
+      - lb1-logs:/var/log/xenticate
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q '1FAE' /proc/net/tcp6 2>/dev/null || grep -q '1FAE' /proc/net/tcp 2>/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── LB-2 ─────────────────────────────────────────────────────────────────
+  lb-2:
+    image: hsm-thales-lb:latest
+    container_name: lb-2
+    hostname: lb-2
+    networks: [hsm-net]
+    ports:
+      - "8111:8111"
+    volumes:
+      - ./config/lb-2/application.properties:/config/application.properties:ro
+      - lb2-logs:/var/log/xenticate
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q '1FAF' /proc/net/tcp6 2>/dev/null || grep -q '1FAF' /proc/net/tcp 2>/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── EZNet-1 ───────────────────────────────────────────────────────────────
+  eznet-1:
+    build:
+      context: ./eznet
+      dockerfile: Dockerfile
+    image: hsm-eznet:latest
+    container_name: eznet-1
+    hostname: eznet-1
+    networks: [hsm-net]
+    ports:
+      - "9100:9100"
+      - "8120:8120"
+    volumes:
+      - ./config/eznet-1/application.properties:/eznet/config/application.properties:ro
+      - eznet1-logs:/var/log/xenticate
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── EZNet-2 ───────────────────────────────────────────────────────────────
+  eznet-2:
+    image: hsm-eznet:latest
+    container_name: eznet-2
+    hostname: eznet-2
+    networks: [hsm-net]
+    ports:
+      - "9101:9100"
+      - "8121:8121"
+    volumes:
+      - ./config/eznet-2/application.properties:/eznet/config/application.properties:ro
+      - eznet2-logs:/var/log/xenticate
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped

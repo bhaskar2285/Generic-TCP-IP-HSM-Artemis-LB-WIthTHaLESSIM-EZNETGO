@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN" monitorInterval="60">
+
+    <Properties>
+        <Property name="LOG_DIR">/var/log/xenticate</Property>
+        <Property name="PATTERN">%d{yyyy-MM-dd HH:mm:ss.SSS} [%t] %-5level %logger{36} - %msg%n</Property>
+        <Property name="PAYLOAD_PATTERN">%d{yyyy-MM-dd HH:mm:ss.SSS} [%t] %msg%n</Property>
+    </Properties>
+
+    <Appenders>
+
+        <!-- Console -->
+        <Console name="CONSOLE" target="SYSTEM_OUT">
+            <PatternLayout pattern="${PATTERN}"/>
+        </Console>
+
+        <!-- Application log — INFO and above, daily rolling, 30 days -->
+        <RollingFile name="APP_LOG"
+                     fileName="${LOG_DIR}/thales-lb-app.log"
+                     filePattern="${LOG_DIR}/thales-lb-app.%d{yyyy-MM-dd}.%i.log.gz">
+            <PatternLayout pattern="${PATTERN}"/>
+            <Policies>
+                <TimeBasedTriggeringPolicy interval="1" modulate="true"/>
+                <SizeBasedTriggeringPolicy size="50MB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="30">
+                <Delete basePath="${LOG_DIR}" maxDepth="1">
+                    <IfFileName glob="thales-lb-app.*.log.gz"/>
+                    <IfAccumulatedFileSize exceeds="1GB"/>
+                </Delete>
+            </DefaultRolloverStrategy>
+            <Filters>
+                <ThresholdFilter level="INFO" onMatch="ACCEPT" onMismatch="DENY"/>
+            </Filters>
+        </RollingFile>
+
+        <!-- Debug log — DEBUG and above for HSM LB classes, 7 days -->
+        <RollingFile name="DEBUG_LOG"
+                     fileName="${LOG_DIR}/thales-lb-debug.log"
+                     filePattern="${LOG_DIR}/thales-lb-debug.%d{yyyy-MM-dd}.%i.log.gz">
+            <PatternLayout pattern="${PATTERN}"/>
+            <Policies>
+                <TimeBasedTriggeringPolicy interval="1" modulate="true"/>
+                <SizeBasedTriggeringPolicy size="100MB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="7">
+                <Delete basePath="${LOG_DIR}" maxDepth="1">
+                    <IfFileName glob="thales-lb-debug.*.log.gz"/>
+                    <IfAccumulatedFileSize exceeds="500MB"/>
+                </Delete>
+            </DefaultRolloverStrategy>
+        </RollingFile>
+
+        <!-- Payload log — full hex dump of every request and response -->
+        <!-- WARNING: grows fast at high TPS — keep retention short    -->
+        <RollingFile name="PAYLOAD_LOG"
+                     fileName="${LOG_DIR}/thales-lb-payload.log"
+                     filePattern="${LOG_DIR}/thales-lb-payload.%d{yyyy-MM-dd}.%i.log.gz">
+            <PatternLayout pattern="${PAYLOAD_PATTERN}"/>
+            <Policies>
+                <TimeBasedTriggeringPolicy interval="1" modulate="true"/>
+                <SizeBasedTriggeringPolicy size="200MB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="3">
+                <Delete basePath="${LOG_DIR}" maxDepth="1">
+                    <IfFileName glob="thales-lb-payload.*.log.gz"/>
+                    <IfAccumulatedFileSize exceeds="1GB"/>
+                </Delete>
+            </DefaultRolloverStrategy>
+        </RollingFile>
+
+        <!-- Health check log — separate so probes don't flood app log -->
+        <RollingFile name="HEALTH_LOG"
+                     fileName="${LOG_DIR}/thales-lb-health.log"
+                     filePattern="${LOG_DIR}/thales-lb-health.%d{yyyy-MM-dd}.log.gz">
+            <PatternLayout pattern="${PATTERN}"/>
+            <Policies>
+                <TimeBasedTriggeringPolicy interval="1" modulate="true"/>
+                <SizeBasedTriggeringPolicy size="20MB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="7"/>
+        </RollingFile>
+
+    </Appenders>
+
+    <Loggers>
+
+        <!-- HSM LB core — DEBUG to both debug and app logs -->
+        <Logger name="com.isc.hsm.transparentlb" level="DEBUG" additivity="false">
+            <AppenderRef ref="DEBUG_LOG"/>
+            <AppenderRef ref="APP_LOG"/>
+            <AppenderRef ref="CONSOLE"/>
+        </Logger>
+
+        <!-- Payload logger — dedicated logger used in PassthroughHandler -->
+        <Logger name="com.isc.hsm.transparentlb.PAYLOAD" level="DEBUG" additivity="false">
+            <AppenderRef ref="PAYLOAD_LOG"/>
+        </Logger>
+
+        <!-- Health checker — its own file only -->
+        <Logger name="com.isc.hsm.transparentlb.health" level="DEBUG" additivity="false">
+            <AppenderRef ref="HEALTH_LOG"/>
+            <AppenderRef ref="APP_LOG"/>
+        </Logger>
+
+        <!-- Spring — INFO only -->
+        <Logger name="org.springframework" level="INFO" additivity="false">
+            <AppenderRef ref="APP_LOG"/>
+        </Logger>
+
+        <!-- ActiveMQ — WARN only -->
+        <Logger name="org.apache.activemq" level="WARN" additivity="false">
+            <AppenderRef ref="APP_LOG"/>
+        </Logger>
+
+        <Root level="INFO">
+            <AppenderRef ref="APP_LOG"/>
+            <AppenderRef ref="CONSOLE"/>
+        </Root>
+
+    </Loggers>
+
+</Configuration>

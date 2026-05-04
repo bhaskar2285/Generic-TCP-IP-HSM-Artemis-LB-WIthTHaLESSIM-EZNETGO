@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<configuration xmlns="urn:activemq"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xmlns:xi="http://www.w3.org/2001/XInclude"
+               xsi:schemaLocation="urn:activemq /schema/artemis-configuration.xsd">
+
+  <core xmlns="urn:activemq:core">
+    <name>artemis-slave</name>
+    <persistence-enabled>true</persistence-enabled>
+    <journal-type>ASYNCIO</journal-type>
+    <bindings-directory>/var/lib/artemis-instance/data/bindings</bindings-directory>
+    <journal-directory>/var/lib/artemis-instance/data/journal</journal-directory>
+    <large-messages-directory>/var/lib/artemis-instance/data/large-messages</large-messages-directory>
+    <paging-directory>/var/lib/artemis-instance/data/paging</paging-directory>
+
+    <!-- Shared-store HA: slave blocks on file lock until master dies, then promotes -->
+    <ha-policy>
+      <shared-store>
+        <slave>
+          <allow-failback>true</allow-failback>
+          <failback-delay>5000</failback-delay>
+        </slave>
+      </shared-store>
+    </ha-policy>
+
+    <acceptors>
+      <acceptor name="openwire">tcp://0.0.0.0:61616?protocols=OPENWIRE;tcpSendBufferSize=1048576;tcpReceiveBufferSize=1048576</acceptor>
+      <acceptor name="artemis">tcp://0.0.0.0:61617?protocols=CORE</acceptor>
+    </acceptors>
+
+    <security-enabled>false</security-enabled>
+
+    <address-settings>
+      <address-setting match="#">
+        <dead-letter-address>DLQ</dead-letter-address>
+        <expiry-address>ExpiryQueue</expiry-address>
+        <redelivery-delay>5000</redelivery-delay>
+        <max-delivery-attempts>3</max-delivery-attempts>
+        <max-size-bytes>104857600</max-size-bytes>
+        <message-counter-history-day-limit>10</message-counter-history-day-limit>
+        <address-full-policy>PAGE</address-full-policy>
+      </address-setting>
+    </address-settings>
+
+    <addresses>
+      <address name="DLQ"><anycast><queue name="DLQ"/></anycast></address>
+      <address name="ExpiryQueue"><anycast><queue name="ExpiryQueue"/></anycast></address>
+    </addresses>
+  </core>
+</configuration>
