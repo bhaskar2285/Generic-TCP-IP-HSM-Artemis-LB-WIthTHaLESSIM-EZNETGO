@@ -11,16 +11,17 @@
 
 | Result | Value |
 |---|---|
-| **Real ceiling** (asyncio, 200 JMS consumers, 100% success) | **1000 requested TPS / 260 achieved TPS** |
-| Earlier ceiling (100 consumers) | 500 TPS |
-| Saturation point (200 consumers) | 1500 TPS (drops to 82% — consumer-pool bound again) |
+| **Best ceiling** (200 consumers, **socket-pool patched**, prefetch=10, 100% success) | **1000 req TPS / 309 achieved TPS** |
+| Latency at the ceiling | avg 24.8 s, p95 32.2 s |
+| Latency in comfortable zone (500 TPS) | **avg 7.4 s, p95 11.0 s** |
+| Best optimisation (vs 200-consumer baseline) | **Real socket pool + prefetch=10**: −66% avg latency at 500 TPS, +18% achieved TPS at 1000 TPS |
+| Original ceiling (100 consumers, no pool) | 500 TPS |
+| 400-consumer attempt | **Regressed** to 98.2% — see §7.1 Run 3 |
 | 32-combo HSM enable/disable matrix | **31/31 active combos pass at 100%** at 300 TPS |
 | Round-robin distribution | Exact: each enabled node gets `total/N` requests |
-| Min latency (5-node, 300 TPS) | 544 ms avg |
 | HA failover (lb-1 stop / lb-2 absorb) | 100% success during cutover and recovery |
-| Linear scaling | **Doubling consumers (100→200) doubled the ceiling (500→1000)** |
 
-The Java load balancer + Artemis JMS layer are not the bottleneck up to ~500 TPS; the bottleneck below that is the HSM backend (the .NET sim), which the Go sim removed.
+The original `ThalesNodePool.send()` was opening a fresh TCP socket per request (`pool.max-total` was dead config — see §4.4). Patching it to use a real `GenericObjectPool<Socket>` was the single biggest optimisation. After that, dropping JMS prefetch from 100 to 10 cut comfortable-zone latency by another 21%.
 
 ---
 
@@ -92,7 +93,12 @@ Even with the LB bug fixed, the .NET sims serialize requests per port and the Wi
 
 This is what motivated swapping to the Go sims.
 
-### 4.3 Artifact: `AdaptiveTuner` fights "circuit breaker disabled"
+### 4.4 Bug: `ThalesNodePool.send()` opens a fresh TCP socket per request
+The `pool.max-total` config was honoured by the pre-existing `ThalesSocketFactory` class (with a `validateObject` probe and all the right Apache commons-pool2 plumbing) — but `ThalesNodePool.send()` ignored the factory and just `new Socket()`-ed inline, closed by try-with-resources. Result: every HSM request paid for full TCP connection setup + teardown, capping achieved throughput at ~260 TPS regardless of consumer count.
+
+**Fix (in this branch):** rewired `ThalesNodePool` to construct a `GenericObjectPool<Socket>` from the factory and borrow/return on each send. Set `testOnBorrow=false` (avoid per-borrow probe overhead), keep `testWhileIdle=true` for background eviction. After this change, achieved TPS at the same 1000 TPS ceiling rose 261 → 328 (+25%) and avg latency dropped 29.9 s → 22.9 s (−23%).
+
+### 4.5 Artifact: `AdaptiveTuner` fights "circuit breaker disabled"
 The LB ships an `AdaptiveTuner` that automatically tightens the circuit-breaker threshold to 2 when error rate > 30%. Setting `circuit-breaker.failure-threshold=2147483647` is **not** sufficient to disable the CB under load — the AdaptiveTuner overrides it. To truly disable CB tuning we set `hsm.lb.adaptive.interval-ms=999999999`.
 
 ---
@@ -101,18 +107,18 @@ The LB ships an `AdaptiveTuner` that automatically tightens the circuit-breaker 
 
 ```properties
 # JMS
-spring.activemq.broker-url=failover:(tcp://artemis-master:61616,tcp://artemis-slave:61616)?jms.prefetchPolicy.queuePrefetch=100&...
-hsm.lb.jms.concurrent-consumers=200       # bumped 100→200, doubled the ceiling
+spring.activemq.broker-url=failover:(tcp://artemis-master:61616,tcp://artemis-slave:61616)?jms.prefetchPolicy.queuePrefetch=10&...
+hsm.lb.jms.concurrent-consumers=200       # 100 → 200 doubled the ceiling; 200 → 400 regressed
 hsm.lb.jms.max-concurrent-consumers=400
 hsm.lb.jms.per-node-capacity=200
 
-# HSM socket pool
-hsm.lb.pool.max-total=20
-hsm.lb.pool.min-idle=2
-hsm.lb.pool.max-wait-ms=16875
-hsm.lb.pool.socket-timeout-ms=16875
+# HSM socket pool — now actually used (see §4.4)
+hsm.lb.pool.max-total=60                  # ~peak in-flight per node; was 20 (and was unused)
+hsm.lb.pool.min-idle=4
+hsm.lb.pool.max-wait-ms=15000
+hsm.lb.pool.socket-timeout-ms=15000
 hsm.lb.pool.connect-timeout-ms=2000
-hsm.lb.pool.fast-fail-timeout-ms=6750     # was the buggy default of 5
+hsm.lb.pool.fast-fail-timeout-ms=5000     # was the buggy default of 5
 
 # Circuit breaker — disabled for benchmarking
 hsm.lb.circuit-breaker.failure-threshold=2147483647
@@ -120,7 +126,7 @@ hsm.lb.adaptive.interval-ms=999999999     # disable AdaptiveTuner so it doesn't 
 
 # Request lifetime
 hsm.lb.retry.max-attempts=2
-hsm.lb.request.max-age-ms=50625
+hsm.lb.request.max-age-ms=45000
 ```
 
 Originally the timers were set lower (5000/2000/15000 ms). The auto-tune-on-fail logic in `tests/auto-tune-asyncio.sh` bumped them 1.5× per failed step — final values reflect what the script settled on.
@@ -185,6 +191,48 @@ Every step samples Artemis `MessageCount`/`DeliveringCount`/`ConsumerCount` for 
 **Run-2 ceiling: 1000 requested TPS / 261 achieved TPS at 99.3% success — exactly 2× the previous ceiling.** Linear scaling with consumer count confirms the bottleneck is JMS consumer throughput per LB, not Artemis broker, network, or HSM backends.
 
 At 1000 TPS achieved (Run 2) the queue depth averages 93 with peaks of 901 — workable. At 1500 TPS the queue blows past 3000 and never drains.
+
+#### Run 3 — 400 JMS consumers per LB (diminishing returns)
+
+| Requested TPS | Achieved TPS | Sent | Ok | Fail | Rate% | Avg ms | p95 | qDepth max | qDepth avg | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1000 | 253 | 14473 | 14218 | 255 | 98.2 | 33828 | 41452 | 1491 | 272 | FAIL |
+| 1000 (auto-tune ×1.5) | 265 | 14369 | 14163 | 206 | 98.6 | 33207 | 40110 | 3171 | 1047 | FAIL |
+
+**Surprising:** going from 200 → 400 consumers **regressed** the same 1000 TPS step from 99.3% to 98.2%. Achieved TPS plateaus around 250-265. Adding consumers past 200 just inflates in-flight backlog and queue depth without raising throughput. Three contributing causes (any one or all):
+1. `ThalesNodePool.send()` opens a fresh TCP socket per request (no real pooling — see §4.4 below). At 260 req/s × 2 LBs that's ~520 socket setup/teardown ops/sec via the docker bridge.
+2. Artemis broker dispatch overhead grows with 800 registered consumers across both LBs.
+3. Prefetch=100 × 800 consumers reserves 80k message slots; idle consumers still get dispatched into, hurting fairness.
+
+#### Run 4 — 200 consumers + **real socket pool** (test b in §6.6 below)
+
+| Requested TPS | Achieved TPS | Success | Avg lat | p95 | qDepth max |
+|---|---|---|---|---|---|
+| 500 | **295** | 100.0% | **9.3 s** | 13.0 s | 603 |
+| 1000 | **328** | **100.0%** | **22.9 s** | 30.8 s | 478 |
+| 1500 | 329 | 97.2% | 25.9 s | 35.7 s | 492 |
+
+**Pooled sockets gave +25% achieved TPS and −23% avg latency at the 1000 TPS step**, and bumped success from 99.3 → 100%. The bottleneck isn't fully gone (1500 TPS still degrades) but it's pushed back.
+
+#### Run 5 — 200 consumers + socket pool + **prefetch=10** (test c)
+
+| Requested TPS | Achieved TPS | Success | Avg lat | p95 | qDepth max |
+|---|---|---|---|---|---|
+| 500 | **325** | 100.0% | **7.4 s** | 11.0 s | **165** |
+| 1000 | 309 | 100.0% | 24.8 s | 32.2 s | 741 |
+| 1500 | 336 | 98.0% | 26.1 s | 34.3 s | 971 |
+
+**Prefetch=10 is a clear win at the comfortable operating point.** At 500 TPS: latency drops a further 21% vs Run 4, and queue-depth max plummets 73% (603 → 165) — Artemis stops batch-reserving messages on idle consumers, so the queue stays shallow and the system feels much more responsive. At 1000 TPS the two are roughly even; at 1500 both still fail.
+
+#### Comparison summary (200 consumers, varying optimisations)
+
+| Run | Pool | Prefetch | 500 TPS avg lat | 1000 TPS rate | 1000 TPS achieved | 1000 TPS qD max |
+|---|---|---|---|---|---|---|
+| Run 2 | per-request | 100 | 21.7 s | 99.3% | 261 | 901 |
+| Run 4 (b) | pooled | 100 | 9.3 s | 100% | **328** | 478 |
+| Run 5 (c) | pooled | 10  | **7.4 s** | 100% | 309 | 741 |
+
+**Final recommendation:** keep the socket pool patch (run 4/5 vs run 2 is a clear improvement) and use **prefetch=10** in the broker URL. The combination gives the lowest latency in the comfortable operating zone (300-500 TPS) without sacrificing the 1000 TPS ceiling.
 
 ### 7.2 32-combo HSM enable/disable matrix (`tests/combo-32-asyncio.sh`)
 
@@ -265,6 +313,8 @@ This is worth confirming with a randomized test order before drawing engineering
 3. **Python `threading` caps load gen at ~70 TPS.** For HSM benchmarking use `asyncio` from the start.
 4. **`host.docker.internal` ≠ Windows host on WSL2.** It resolves to docker0 bridge inside containers. Use the `<computer>.mshome.net` hostname or the WSL→Windows gateway IP.
 5. **The .NET Thales sim is fine for correctness but useless for performance work.** Moving HSM sims into the docker network removes a huge variable.
+6. **`spring.threads.virtual.enabled=true` does not switch JMS consumers to virtual threads.** It only swaps Tomcat's HTTP executor and `@Async` methods. To run JMS consumers on virtual threads you need a custom `JmsListenerContainerFactory` that calls `setTaskExecutor(VirtualThreadTaskExecutor.create("jms-"))`. This is a candidate "test (d)" for future work — it could let us push consumer counts past 200 without the regression we saw at 400, since virtual threads are essentially free.
+7. **Pool the sockets, then drop the prefetch.** Real HSM connection pooling was the largest single throughput/latency win (+25% / −23%). Once pooling is in place, lowering JMS prefetch from 100 → 10 cuts comfortable-zone latency by another 21% and queue depth by 73% — Artemis stops batch-reserving messages on idle consumers, so work spreads out.
 
 ---
 
@@ -274,7 +324,7 @@ This is worth confirming with a randomized test order before drawing engineering
 |---|---|
 | LB defaults | Raise `pool.fast-fail-timeout-ms` from 5 → 1000 ms; add `hsm.lb.adaptive.enabled` boolean |
 | LB code | Investigate the per-node latency anomaly — randomize the warm-up test or pre-warm pools |
-| Stack capacity | Comfortable: 300 TPS at p95 ≤ 1 s. Sustainable ceiling at 99% success: **1000 TPS** (with 200 consumers per LB). Linear-scaling rule observed: ceiling ≈ `consumers × 5` |
+| Stack capacity | With socket pool + prefetch=10: comfortable 500 TPS at avg 7.4 s / p95 11 s. Sustainable ceiling at 100% success: **1000 TPS** (achieved 309). Past 200 consumers, scaling is non-linear (regresses) — fix `ThalesNodePool` first then look at virtual-thread JMS consumers |
 | Test suite | Replace existing test scripts' hardcoded port 9100 → make `EZNET_PORT` env var; replace `supervisorctl` calls in `test-hsm-dual-lb-benchmark.sh` → `docker stop/start` |
 
 ---

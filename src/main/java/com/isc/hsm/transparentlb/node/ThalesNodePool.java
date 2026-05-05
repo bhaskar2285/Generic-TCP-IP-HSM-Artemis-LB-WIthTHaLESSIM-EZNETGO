@@ -1,12 +1,15 @@
 package com.isc.hsm.transparentlb.node;
 
 import com.isc.hsm.transparentlb.config.LbProperties;
+import org.apache.commons.pool2.impl.GenericObjectPool;
+import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.time.Duration;
 
 public class ThalesNodePool {
 
@@ -14,6 +17,7 @@ public class ThalesNodePool {
 
     private final ThalesNode node;
     private final LbProperties props;
+    private final GenericObjectPool<Socket> pool;
 
     public ThalesNodePool(ThalesNode node, LbProperties props) {
         this.node = node;
@@ -22,6 +26,31 @@ public class ThalesNodePool {
             props.getCircuitBreaker().getFailureThreshold(),
             props.getCircuitBreaker().getResetMs()
         );
+
+        ThalesSocketFactory factory = new ThalesSocketFactory(
+            node.getHost(),
+            node.getPort(),
+            props.getPool().getConnectTimeoutMs(),
+            props.getPool().getSocketTimeoutMs()
+        );
+
+        GenericObjectPoolConfig<Socket> cfg = new GenericObjectPoolConfig<>();
+        cfg.setMaxTotal(props.getPool().getMaxTotal());
+        cfg.setMinIdle(props.getPool().getMinIdle());
+        cfg.setMaxIdle(props.getPool().getMaxTotal());
+        cfg.setMaxWait(Duration.ofMillis(props.getPool().getMaxWaitMs()));
+        cfg.setBlockWhenExhausted(true);
+        cfg.setTestOnBorrow(false);             // skip per-borrow probe; invalidate on failure instead
+        cfg.setTestOnReturn(false);
+        cfg.setTestWhileIdle(true);              // background eviction probes only
+        cfg.setTimeBetweenEvictionRuns(Duration.ofSeconds(30));
+        cfg.setMinEvictableIdleDuration(Duration.ofMinutes(2));
+        cfg.setNumTestsPerEvictionRun(-1);       // test all idle on each eviction run
+        cfg.setJmxEnabled(false);
+
+        this.pool = new GenericObjectPool<>(factory, cfg);
+        log.info("Created socket pool for node {} (maxTotal={}, minIdle={})",
+            node.getId(), cfg.getMaxTotal(), cfg.getMinIdle());
     }
 
     public byte[] send(byte[] rawCommand) throws Exception {
@@ -32,13 +61,12 @@ public class ThalesNodePool {
         node.incrementActive();
         node.recordRequest();
         long t0 = System.currentTimeMillis();
-        try (Socket socket = new Socket()) {
+
+        Socket socket = null;
+        boolean broken = false;
+        try {
+            socket = pool.borrowObject();
             socket.setSoTimeout(timeoutMs);
-            socket.setTcpNoDelay(true);
-            socket.connect(
-                new java.net.InetSocketAddress(node.getHost(), node.getPort()),
-                Math.min(timeoutMs, props.getPool().getConnectTimeoutMs())
-            );
 
             OutputStream out = socket.getOutputStream();
             InputStream in = socket.getInputStream();
@@ -53,10 +81,12 @@ public class ThalesNodePool {
             byte[] response = readResponse(in);
 
             // Verify payShield echoes request header (first 4 bytes of body = request header).
-            // Guards against stale/misrouted HSM responses reaching wrong client.
+            // Guards against a stale/misrouted HSM response reaching the wrong client when
+            // sockets are reused from the pool.
             if (rawCommand.length >= 4 && response.length >= 4) {
                 for (int i = 0; i < 4; i++) {
                     if (response[i] != rawCommand[i]) {
+                        broken = true; // socket is out of sync — drop it
                         throw new Exception(String.format(
                             "HSM node %s response header mismatch at byte %d: req=0x%02X resp=0x%02X",
                             node.getId(), i, rawCommand[i] & 0xFF, response[i] & 0xFF));
@@ -69,10 +99,17 @@ public class ThalesNodePool {
             return response;
 
         } catch (Exception e) {
+            broken = true;
             node.getResponseStats().record(System.currentTimeMillis() - t0, true);
             node.recordError();
             throw e;
         } finally {
+            if (socket != null) {
+                try {
+                    if (broken) pool.invalidateObject(socket);
+                    else        pool.returnObject(socket);
+                } catch (Exception ignored) {}
+            }
             node.decrementActive();
         }
     }
@@ -100,11 +137,13 @@ public class ThalesNodePool {
         }
     }
 
-    public void close() {}
+    public void close() {
+        try { pool.close(); } catch (Exception ignored) {}
+    }
 
     public ThalesNode getNode() { return node; }
 
-    public int getNumActive() { return node.getActiveConnections(); }
+    public int getNumActive() { return pool.getNumActive(); }
 
-    public int getNumIdle() { return 0; }
+    public int getNumIdle() { return pool.getNumIdle(); }
 }
