@@ -122,7 +122,7 @@ services:
     hostname: eznet-1
     networks: [hsm-net]
     ports:
-      - "9100:9100"
+      - "9105:9100"
       - "8120:8120"
     volumes:
       - ./config/eznet-1/application.properties:/eznet/config/application.properties:ro
@@ -147,4 +147,53 @@ services:
     depends_on:
       artemis-master:
         condition: service_healthy
+    restart: unless-stopped
+
+  # ── Go HSM sim x5 (in-cluster, replaces .NET sims for benchmarking) ───────
+  # Each listens on its own port (9000-9004) so they're individually addressable
+  # both on the docker network (hsm-sim-N:900X) and on the host (19000-19004).
+  hsm-sim-1:
+    build: { context: ./hsm-sim, dockerfile: Dockerfile }
+    image: hsm-sim:latest
+    container_name: hsm-sim-1
+    hostname: hsm-sim-1
+    networks: [hsm-net]
+    ports: ["19000:9000"]
+    environment: { SIM_ID: hsm-sim-1, SIM_LISTEN: ":9000" }
+    restart: unless-stopped
+  hsm-sim-2:
+    image: hsm-sim:latest
+    container_name: hsm-sim-2
+    hostname: hsm-sim-2
+    networks: [hsm-net]
+    ports: ["19001:9001"]
+    environment: { SIM_ID: hsm-sim-2, SIM_LISTEN: ":9001" }
+    depends_on: [hsm-sim-1]
+    restart: unless-stopped
+  hsm-sim-3:
+    image: hsm-sim:latest
+    container_name: hsm-sim-3
+    hostname: hsm-sim-3
+    networks: [hsm-net]
+    ports: ["19002:9002"]
+    environment: { SIM_ID: hsm-sim-3, SIM_LISTEN: ":9002" }
+    depends_on: [hsm-sim-1]
+    restart: unless-stopped
+  hsm-sim-4:
+    image: hsm-sim:latest
+    container_name: hsm-sim-4
+    hostname: hsm-sim-4
+    networks: [hsm-net]
+    ports: ["19003:9003"]
+    environment: { SIM_ID: hsm-sim-4, SIM_LISTEN: ":9003" }
+    depends_on: [hsm-sim-1]
+    restart: unless-stopped
+  hsm-sim-5:
+    image: hsm-sim:latest
+    container_name: hsm-sim-5
+    hostname: hsm-sim-5
+    networks: [hsm-net]
+    ports: ["19004:9004"]
+    environment: { SIM_ID: hsm-sim-5, SIM_LISTEN: ":9004" }
+    depends_on: [hsm-sim-1]
     restart: unless-stopped
