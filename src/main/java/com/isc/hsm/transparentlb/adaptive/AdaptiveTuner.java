@@ -58,8 +58,9 @@ public class AdaptiveTuner {
 
     @Scheduled(fixedDelayString = "${hsm.lb.adaptive.interval-ms:30000}")
     public void tune() {
+        if (!props.getAdaptive().isEnabled()) return;
         tuneSocketTimeout();
-        tuneCircuitBreakers();
+        if (props.getCircuitBreaker().isEnabled()) tuneCircuitBreakers();
         syncRequestTtl();
     }
 

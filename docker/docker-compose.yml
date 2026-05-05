@@ -30,6 +30,9 @@ services:
       ARTEMIS_USER: artemis
       ARTEMIS_PASSWORD: artemis
       ANONYMOUS_LOGIN: "true"
+      JAVA_ARGS: "-Xms1g -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=100"
+    mem_limit: 1500m
+    memswap_limit: 1500m
     healthcheck:
       test: ["CMD-SHELL", "grep -q 'F0B0' /proc/net/tcp6 2>/dev/null || grep -q 'F0B0' /proc/net/tcp 2>/dev/null"]
       interval: 5s
@@ -56,6 +59,9 @@ services:
       ARTEMIS_USER: artemis
       ARTEMIS_PASSWORD: artemis
       ANONYMOUS_LOGIN: "true"
+      JAVA_ARGS: "-Xms1g -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=100"
+    mem_limit: 1500m
+    memswap_limit: 1500m
     depends_on:
       artemis-master:
         condition: service_healthy
@@ -127,6 +133,54 @@ services:
     volumes:
       - ./config/eznet-1/application.properties:/eznet/config/application.properties:ro
       - eznet1-logs:/var/log/xenticate
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── EZNet-3 (added for horizontal scaling test) ──────────────────────────
+  eznet-3:
+    image: hsm-eznet:latest
+    container_name: eznet-3
+    hostname: eznet-3
+    networks: [hsm-net]
+    ports:
+      - "9106:9100"
+      - "8122:8122"
+    volumes:
+      - ./config/eznet-3/application.properties:/eznet/config/application.properties:ro
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── EZNet-4 (linear-scaling test) ────────────────────────────────────────
+  eznet-4:
+    image: hsm-eznet:latest
+    container_name: eznet-4
+    hostname: eznet-4
+    networks: [hsm-net]
+    ports:
+      - "9107:9100"
+      - "8124:8124"
+    volumes:
+      - ./config/eznet-4/application.properties:/eznet/config/application.properties:ro
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── EZNet-5 (linear-scaling test) ────────────────────────────────────────
+  eznet-5:
+    image: hsm-eznet:latest
+    container_name: eznet-5
+    hostname: eznet-5
+    networks: [hsm-net]
+    ports:
+      - "9108:9100"
+      - "8125:8125"
+    volumes:
+      - ./config/eznet-5/application.properties:/eznet/config/application.properties:ro
     depends_on:
       artemis-master:
         condition: service_healthy

@@ -13,11 +13,16 @@
     <large-messages-directory>/var/lib/artemis-instance/data/large-messages</large-messages-directory>
     <paging-directory>/var/lib/artemis-instance/data/paging</paging-directory>
 
-    <!-- Shared-store HA: master holds the file lock; slave waits -->
+    <!-- Shared-store HA: master holds the file lock; slave waits.
+         failover-on-shutdown=true makes a graceful master shutdown release the lock
+         so the slave can promote without delay.
+         Failback (master taking over from slave on restart) is driven by the slave's
+         allow-failback=true in broker-slave.xml — when slave detects master alive on
+         the shared store, it shuts itself down so master can re-acquire the lock. -->
     <ha-policy>
       <shared-store>
         <master>
-          <failover-on-shutdown>false</failover-on-shutdown>
+          <failover-on-shutdown>true</failover-on-shutdown>
         </master>
       </shared-store>
     </ha-policy>

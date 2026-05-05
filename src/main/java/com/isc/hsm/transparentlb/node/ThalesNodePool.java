@@ -26,6 +26,7 @@ public class ThalesNodePool {
             props.getCircuitBreaker().getFailureThreshold(),
             props.getCircuitBreaker().getResetMs()
         );
+        node.setCircuitBreakerEnabled(props.getCircuitBreaker().isEnabled());
 
         ThalesSocketFactory factory = new ThalesSocketFactory(
             node.getHost(),

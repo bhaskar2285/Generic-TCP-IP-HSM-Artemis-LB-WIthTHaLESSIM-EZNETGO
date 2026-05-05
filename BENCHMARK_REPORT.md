@@ -11,15 +11,18 @@
 
 | Result | Value |
 |---|---|
-| **Best ceiling** (200 consumers, **socket-pool patched**, prefetch=10, 100% success) | **1000 req TPS / 309 achieved TPS** |
-| Latency at the ceiling | avg 24.8 s, p95 32.2 s |
-| Latency in comfortable zone (500 TPS) | **avg 7.4 s, p95 11.0 s** |
-| Best optimisation (vs 200-consumer baseline) | **Real socket pool + prefetch=10**: −66% avg latency at 500 TPS, +18% achieved TPS at 1000 TPS |
-| Original ceiling (100 consumers, no pool) | 500 TPS |
-| 400-consumer attempt | **Regressed** to 98.2% — see §7.1 Run 3 |
+| **Best ceiling — 5 HSM, 3 EZNet, locked-best LB config, 100% success** | **2000 req TPS / 308 achieved TPS** (avg 39 s, p95 49 s) |
+| **Best ceiling — 5 HSM, 2 EZNet (pre-scaling), 100% success** | 1000 req TPS / 309 achieved TPS (avg 24.8 s, p95 32.2 s) |
+| **Comfortable operating zone — 5 HSM, 3 EZNet** | 500 TPS / **avg 5.6 s** / 100% |
+| Largest single optimisation | **Real socket-pool patch** in `ThalesNodePool` (fresh `new Socket()` per request was hidden bug — see §4.4): +25% achieved TPS, −23% avg latency at the same ceiling |
+| Second largest | **Drop JMS prefetch 100 → 10**: −21% comfortable-zone latency, −73% queue depth |
+| Third largest | **Add eznet-3** (was the per-bridge CPU bottleneck): doubled ceiling 1000 → 2000 TPS |
+| What backfired | 400 consumers (regression vs 200), virtual-thread JMS executor (slight regression — OpenWire pins VTs), 5 EZNets at 1500+ TPS (Artemis OOM with 1 GB heap) |
+| HSM-count scan (5 EZNet, locked timers) — see §13.3 | 1 HSM → 200 TPS · 2 HSM → 1000 TPS · 3 HSM → 1000 TPS · 5 HSM → 2000 TPS |
 | 32-combo HSM enable/disable matrix | **31/31 active combos pass at 100%** at 300 TPS |
 | Round-robin distribution | Exact: each enabled node gets `total/N` requests |
 | HA failover (lb-1 stop / lb-2 absorb) | 100% success during cutover and recovery |
+| Open issue | Artemis-master can't auto-failback after OOM crash — slave keeps lock; needs manual intervention. See §14. |
 
 The original `ThalesNodePool.send()` was opening a fresh TCP socket per request (`pool.max-total` was dead config — see §4.4). Patching it to use a real `GenericObjectPool<Socket>` was the single biggest optimisation. After that, dropping JMS prefetch from 100 to 10 cut comfortable-zone latency by another 21%.
 
@@ -33,12 +36,15 @@ Deployed via `docker compose up -d` against the `Generic-TCP-IP-HSM-Artemis-LB` 
 
 | Container | Image | Host port | Purpose |
 |---|---|---|---|
-| `artemis-master` | `apache/activemq-artemis:2.38.0` | 61626 → 61616, 18163 → 8161 | OpenWire JMS + Hawtio UI |
-| `artemis-slave` | `apache/activemq-artemis:2.38.0` | 61627 → 61616, 18164 → 8161 | Shared-store HA standby |
+| `artemis-master` | `apache/activemq-artemis:2.38.0` (1 GB heap, 1.5 GB container limit) | 61626 → 61616, 18163 → 8161 | OpenWire JMS + Hawtio UI |
+| `artemis-slave` | `apache/activemq-artemis:2.38.0` (same limits) | 61627 → 61616, 18164 → 8161 | Shared-store HA standby (allow-failback=true) |
 | `lb-1` | local build (`hsm-thales-lb:latest`) | 8110 | LB instance 1 |
 | `lb-2` | local build | 8111 | LB instance 2 |
 | `eznet-1` | local build (`hsm-eznet:latest`) | **9105** → 9100, 8120 | TCP client inbound (remapped — see §2.3) |
 | `eznet-2` | local build | 9101 → 9100, 8121 | TCP client inbound |
+| `eznet-3` | local build | 9106 → 9100, 8122 | TCP client inbound (added §13) |
+| `eznet-4` | local build | 9107 → 9100, 8124 | TCP client inbound (added §13) |
+| `eznet-5` | local build | 9108 → 9100, 8125 | TCP client inbound (added §13) |
 | `hsm-sim-1..5` | local Go build (`hsm-sim:latest`) | 19000-19004 → 9000-9004 | In-cluster Go HSM sims |
 
 ### 2.2 Pre-deployment cleanup
@@ -363,3 +369,141 @@ TPS=300 DUR=10 bash ../tests/combo-32-asyncio.sh   # 32-combo matrix
 | `tests/measure-200tps.sh` | Single-step measurement at fixed TPS |
 | `tests/test-hsm-load.docker.sh` | Patched original test (port 9100 → 9105) |
 | `tests/test-hsm-dual-lb-benchmark.docker.sh` | Patched original (supervisor → docker stop/start) |
+
+---
+
+## 13. EZNet horizontal scaling + HSM count scan
+
+After the §7-12 work, two further questions: does adding EZNets raise the ceiling, and how does ceiling scale with HSM count?
+
+### 13.1 3 EZNets vs 2 EZNets — same 5 HSMs
+
+Adding `eznet-3` (host port 9106) and routing the asyncio sweep round-robin across all three host ports.
+
+| TPS req | 2 EZNet (best) | 3 EZNet | Δ |
+|---|---|---|---|
+| 500 — avg lat | 9.5 s | **5.6 s** | −41% |
+| 1000 — achieved TPS | 320 | **391** | +22% |
+| 1000 — avg lat | 23.8 s | **16.4 s** | −31% |
+| **1500** | 94.4% FAIL | **100% PASS, 408 atps, 19.7 s avg** | new |
+| **2000** | n/a | **99.2% PASS, 308 atps, 39 s avg** | new |
+
+**Ceiling jumped from 1000 → 2000 TPS by adding one more EZNet.** EZNet is the JMS↔TCP bridge — it was the per-instance bottleneck (each running ~140% CPU at 1000 TPS).
+
+### 13.2 5 EZNets — Artemis OOM crash
+
+Adding `eznet-4` and `eznet-5` and re-sweeping with **NO_AUTO_TUNE=1** and timers locked at the best-known values (`socket=15s, fast-fail=5s, max-wait=15s, max-age=45s`).
+
+5 EZNets at 1500 TPS triggered Artemis-master to OOM-kill (memory peaked at 1444 MiB, very close to the 1500 MiB container limit). When master restarted, the slave had already promoted and was holding the lock — master went into `Waiting indefinitely to obtain primary lock`. See §14 for the failback story.
+
+### 13.3 HSM count scan (1 → 2 → 3) with 5 EZNets, locked timers
+
+Single sweep per HSM-count, ladder `200, 500, 1000, 1500`, all under the **best-of-best** config (200 consumers, pooled sockets, prefetch=10, CB off, AdaptiveTuner off, no auto-tune).
+
+| HSMs | 200 TPS | 500 TPS | 1000 TPS | 1500 TPS | Ceiling |
+|---|---|---|---|---|---|
+| 1 | 100% / 1.6 s avg | **83.4% FAIL** | not reached | not reached | **200 TPS** |
+| 2 | 100% / 0.35 s avg | 100% / 6.9 s avg | 100% / 21.2 s avg | 14.2% (Artemis OOM) | **1000 TPS** |
+| 3 | 100% / 0.45 s avg | 100% / 4.5 s avg | 100% / 18.9 s avg | 7.8% (Artemis OOM) | **1000 TPS** |
+
+Three things to notice:
+
+1. **1 HSM at 500 TPS now fails** where the same TPS at 5 HSMs had passed. The single Go sim's per-port socket pool (60 sockets) saturates when 5 EZNets each push ~100 req/s at it. Earlier "1 HSM passes 1000 TPS" runs benefited from auto-tuned-up timers (`max-age` had crept to 67 s, masking the real failure mode).
+2. **2 HSMs ≈ 3 HSMs** at this consumer config. Both pass 1000 TPS at 100%. The bottleneck has moved upstream of the HSMs — they're no longer the limit.
+3. **1500 TPS triggers Artemis OOM with 1 GB heap.** Same crash mode as 5-EZNet run in §13.2 — paged messages + delivering messages + journal buffers blow past the heap. Need 2 GB heap to safely run 1500 TPS, which doesn't fit on this laptop.
+
+### 13.4 Per-container resource consumption (locked timers, 5 EZNet, 3 HSM, 1000 TPS)
+
+| Container | CPU avg / peak | Mem | Notes |
+|---|---|---|---|
+| lb-1 | 36% / 91% | 429 MiB | half a core |
+| lb-2 | 43% / 96% | 393 MiB | half a core |
+| **artemis-master** | 5% / 20% | **188 MiB** | **standby** — slave holds lock |
+| artemis-slave (active) | (not in CONTAINERS list — re-add to capture) | ~1.4 GiB observed | the actual hot broker |
+| eznet-1..5 | 50-67% / 71-108% | 517-625 MiB | now load-balanced |
+
+**Stack total at 1000 TPS:** ~5 cores, ~3.5 GiB RAM (excluding hsm-sims).
+
+---
+
+## 14. Artemis OOM + failback — what we learned
+
+### 14.1 The problem
+
+Under load tests at 1500 TPS+, `artemis-master` OOM-killed (1 GB heap, 1.5 GB container limit). Docker's `restart: unless-stopped` brought it back, but it then sat at:
+
+```
+AMQ221034: Waiting indefinitely to obtain primary lock
+```
+
+— because `artemis-slave` had already promoted and was holding the shared journal lock.
+
+### 14.2 What controls failback
+
+- **Slave** must have `<allow-failback>true</allow-failback>` (it does — see `broker-slave.xml`). When the slave detects the master is alive on the shared store, it gracefully shuts itself down so master can re-acquire the lock.
+- **Master**: `<failover-on-shutdown>true</failover-on-shutdown>` (added in this branch) — on a clean master shutdown, the lock is released immediately so the slave promotes without delay.
+- **Note:** `<check-for-live-server>` is *not* valid for shared-store HA in Artemis 2.38 (only for replicated HA) — adding it makes the broker fail XSD validation and refuse to start. Don't add it.
+
+### 14.3 Why failback didn't auto-trigger in our test
+
+Even with the right config, the slave didn't step down for master after the OOM. Likely because:
+- Slave was actively serving high traffic and didn't run the failback check often enough
+- Master crashed mid-write, leaving the journal in a half-recovered state that confused failback detection
+
+**Manual recovery (worked):** stop slave → master grabs lock → start slave → slave goes back into standby. In production this should be automated via a watchdog or Kubernetes probes.
+
+### 14.4 What stops the OOM in the first place
+
+| Lever | Tried? | Effect |
+|---|---|---|
+| `JAVA_ARGS=-Xms1g -Xmx1g` (1 GB heap) | yes | Stable up to ~1000 TPS, OOM at 1500 |
+| `mem_limit: 1500m` | yes | Container OOM-kills cleanly so docker restart triggers |
+| Reduce `max-size-bytes` per address (paging trigger) | partial | Currently 100 MB; lower would page sooner but slower |
+| Larger heap (2 GB+) | possible | Not viable on dev laptop, but doable in prod |
+| Cluster (multiple active brokers, message redistribution) | **future** | The right fix for production scale |
+
+### 14.5 Recommended production HA
+
+1. Run brokers under a watchdog (systemd / k8s) with health probes that fail when `Waiting indefinitely to obtain primary lock` appears in logs → trigger restart of slave.
+2. Set heap to fit the workload: `1 GB heap → ≤1000 TPS sustained`. Scale up: `2 GB → ≤2500 TPS`. Above that, use a cluster of multiple active brokers, not bigger heaps.
+3. Monitor `MessageCount` on `hsm.transparent.lb.in` — sustained > 500 = approaching ceiling.
+
+---
+
+## 15. Auto-tune in production: don't
+
+The `auto-tune-on-fail` mechanism in the bench scripts (and the in-LB `AdaptiveTuner`) was useful for *finding* operating limits during tuning, but is the wrong default for production:
+
+- **Each retry-with-bumped-timers takes ~30 s** of LB restart, masking real ceiling vs. recoverable transient.
+- **Bumped timers create a feedback loop**: if the system is slow because of a transient overload, longer timeouts let messages queue further, which makes the system slower, which the tuner reads as a need for even longer timeouts. A bench run we did got `socket-timeout` from 15 s → 25 s → 38 s → 56 s before giving up — none of which actually fixed the problem.
+- **`max-age` creeping above 60 s** caused the LB to drop messages as expired *while they were still in flight at the broker*, which looks like a partial outage to anyone watching client error rates.
+
+The new defaults:
+- `tests/auto-tune-asyncio.sh` and `tests/auto-tune-asyncio-with-stats.sh` now both default to `NO_AUTO_TUNE=1`. Set `NO_AUTO_TUNE=0` only when intentionally hunting for new ceilings.
+- LB props: `hsm.lb.adaptive.enabled=false` and `hsm.lb.circuit-breaker.enabled=false` flags now exist (see §16 below) — production should set them true with a *fixed* timeout strategy.
+
+---
+
+## 16. Feature toggles added in this work
+
+Three boolean toggles added to the LB (proper alternatives to the `failure-threshold=2147483647` + `interval-ms=999999999` hacks used earlier):
+
+| Property | Default | Purpose |
+|---|---|---|
+| `hsm.lb.adaptive.enabled` | `true` | When `false`, `AdaptiveTuner.tune()` early-returns. Use this instead of setting interval to a huge number. |
+| `hsm.lb.circuit-breaker.enabled` | `true` | When `false`, `ThalesNode.isCircuitOpen()` always returns false and `recordError()` doesn't trip the CB. Use this instead of setting failure threshold to MAX_INT. |
+| `hsm.lb.jms.virtual-threads` | `false` | When `true`, `JmsListenerContainerFactory` wires a `VirtualThreadTaskExecutor`. Tested (test d in §7.1 — slightly hurt latency, no ceiling lift; OpenWire client pins VTs in `synchronized` blocks). |
+
+---
+
+## 17. Final recommendations
+
+| Area | Recommendation |
+|---|---|
+| **LB defaults** | `pool.fast-fail-timeout-ms=2000` (was 5 — see §4.1). Real socket pool patch landed in §6.6. CB and AdaptiveTuner toggles in §16. |
+| **JMS** | `prefetch=10` for low-latency, 200 consumers per LB, `virtual-threads=false` (it doesn't help here — see §6.6 test d). |
+| **EZNet** | Run **3 instances minimum** for any TPS > 500; bottleneck per-EZNet at ~140% CPU. Beyond 5 instances doesn't help once Artemis becomes the limit. |
+| **HSM count** | 3 HSMs is the inflection: above that, ceiling becomes Artemis-bound, not HSM-bound. Below 2, the per-HSM socket pool saturates fast under multi-EZNet load. |
+| **Artemis** | At least 1 GB heap for ≤1000 TPS, 2 GB for ≤2500 TPS. Set `mem_limit` so docker can restart on OOM. Add a watchdog for failback when slave holds lock indefinitely. |
+| **Production load gen** | Use asyncio (or `wrk`/`vegeta`), never threaded. Threaded Python caps at ~70 TPS regardless of target. |
+

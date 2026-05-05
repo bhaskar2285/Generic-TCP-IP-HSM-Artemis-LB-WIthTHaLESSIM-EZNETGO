@@ -25,6 +25,7 @@ public class ThalesNode {
     private volatile long circuitOpenedAt = 0;
     private int circuitFailureThreshold = 5;
     private long circuitResetMs = 30_000;
+    private volatile boolean circuitBreakerEnabled = true;
 
     public ThalesNode(String id, String host, int port, int weight) {
         this.id = id;
@@ -37,6 +38,9 @@ public class ThalesNode {
         this.circuitFailureThreshold = failureThreshold;
         this.circuitResetMs = resetMs;
     }
+
+    public void setCircuitBreakerEnabled(boolean v) { this.circuitBreakerEnabled = v; }
+    public boolean isCircuitBreakerEnabled() { return circuitBreakerEnabled; }
 
     public String getId() { return id; }
     public String getHost() { return host; }
@@ -58,6 +62,7 @@ public class ThalesNode {
     public void setEnabled(boolean v) { enabled.set(v); }
 
     public boolean isCircuitOpen() {
+        if (!circuitBreakerEnabled) return false;
         int errors = consecutiveErrors.get();
         if (errors < circuitFailureThreshold) return false;
         long openedAt = circuitOpenedAt;
@@ -82,7 +87,7 @@ public class ThalesNode {
     public void recordError() {
         totalErrors.incrementAndGet();
         int errs = consecutiveErrors.incrementAndGet();
-        if (errs >= circuitFailureThreshold && circuitOpenedAt == 0) {
+        if (circuitBreakerEnabled && errs >= circuitFailureThreshold && circuitOpenedAt == 0) {
             circuitOpenedAt = System.currentTimeMillis();
         }
     }

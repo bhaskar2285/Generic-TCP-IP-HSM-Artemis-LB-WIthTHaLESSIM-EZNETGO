@@ -24,7 +24,10 @@ public class LbProperties {
     private AdaptiveConfig adaptive = new AdaptiveConfig();
 
     public static class AdaptiveConfig {
+        private boolean enabled = true;
         private long intervalMs = 30000;
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean v) { enabled = v; }
         public long getIntervalMs() { return intervalMs; }
         public void setIntervalMs(long v) { intervalMs = v; }
     }
@@ -64,12 +67,15 @@ public class LbProperties {
         private int concurrentConsumers = 20;
         private int maxConcurrentConsumers = 100;
         private int perNodeCapacity = 10;
+        private boolean virtualThreads = false;
         public int getConcurrentConsumers() { return concurrentConsumers; }
         public void setConcurrentConsumers(int v) { concurrentConsumers = v; }
         public int getMaxConcurrentConsumers() { return maxConcurrentConsumers; }
         public void setMaxConcurrentConsumers(int v) { maxConcurrentConsumers = v; }
         public int getPerNodeCapacity() { return perNodeCapacity; }
         public void setPerNodeCapacity(int v) { perNodeCapacity = v; }
+        public boolean isVirtualThreads() { return virtualThreads; }
+        public void setVirtualThreads(boolean v) { virtualThreads = v; }
     }
 
     public static class PoolConfig {
@@ -106,8 +112,11 @@ public class LbProperties {
     }
 
     public static class CircuitBreakerConfig {
+        private boolean enabled = true;
         private int failureThreshold = 5;
         private long resetMs = 30000;
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean v) { enabled = v; }
         public int getFailureThreshold() { return failureThreshold; }
         public void setFailureThreshold(int v) { failureThreshold = v; }
         public long getResetMs() { return resetMs; }
