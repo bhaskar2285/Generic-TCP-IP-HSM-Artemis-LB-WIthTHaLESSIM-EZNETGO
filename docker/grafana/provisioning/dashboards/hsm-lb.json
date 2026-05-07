@@ -51,8 +51,8 @@
       "options": { "legend": { "calcs": ["mean"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "expr": "rate(hsm_lb_requests_total{result=\"error\"}[1m]) / rate(hsm_lb_requests_total[1m])",
-          "legendFormat": "{{instance}} error rate",
+          "expr": "sum by (exported_instance) (rate(hsm_lb_requests_total{result=\"error\"}[1m])) / sum by (exported_instance) (rate(hsm_lb_requests_total[1m]))",
+          "legendFormat": "{{exported_instance}} error rate",
           "refId": "A"
         }
       ],
@@ -70,19 +70,14 @@
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(hsm_lb_request_duration_bucket[1m])) by (le, instance))",
-          "legendFormat": "{{instance}} p50",
+          "expr": "sum by (exported_instance) (rate(hsm_lb_request_duration_seconds_sum[1m])) / sum by (exported_instance) (rate(hsm_lb_request_duration_seconds_count[1m]))",
+          "legendFormat": "{{exported_instance}} avg",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(hsm_lb_request_duration_bucket[1m])) by (le, instance))",
-          "legendFormat": "{{instance}} p95",
+          "expr": "max by (exported_instance) (hsm_lb_request_duration_seconds_max)",
+          "legendFormat": "{{exported_instance}} max",
           "refId": "B"
-        },
-        {
-          "expr": "histogram_quantile(0.99, sum(rate(hsm_lb_request_duration_bucket[1m])) by (le, instance))",
-          "legendFormat": "{{instance}} p99",
-          "refId": "C"
         }
       ],
       "title": "LB Request Latency",
@@ -99,7 +94,7 @@
       "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
       "targets": [
         {
-          "expr": "hsm_lb_node_healthy",
+          "expr": "max by (node) (hsm_lb_node_healthy)",
           "legendFormat": "{{node}}",
           "refId": "A"
         }
@@ -118,7 +113,7 @@
       "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
       "targets": [
         {
-          "expr": "hsm_lb_node_circuit_open",
+          "expr": "max by (node) (hsm_lb_node_circuit_open)",
           "legendFormat": "{{node}}",
           "refId": "A"
         }
@@ -232,7 +227,7 @@
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "expr": "jvm_memory_used_bytes{job=\"eznet\", area=\"heap\"}",
+          "expr": "sum by (instance) (jvm_memory_used_bytes{job=\"eznet\", area=\"heap\"})",
           "legendFormat": "{{instance}} heap",
           "refId": "A"
         }
@@ -327,8 +322,8 @@
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "expr": "rate(container_cpu_usage_seconds_total{image!=\"\", name=~\"artemis.*|lb-.*|eznet-.*|hsm-sim-.*\"}[1m])",
-          "legendFormat": "{{name}}",
+          "expr": "rate(container_cpu_usage_seconds_total{id=~\"/system.slice/.*\", cpu=\"total\"}[1m])",
+          "legendFormat": "{{id}}",
           "refId": "A"
         }
       ],
@@ -346,8 +341,8 @@
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "expr": "container_memory_usage_bytes{image!=\"\", name=~\"artemis.*|lb-.*|eznet-.*|hsm-sim-.*\"}",
-          "legendFormat": "{{name}}",
+          "expr": "container_memory_usage_bytes{id=~\"/system.slice/.*\"}",
+          "legendFormat": "{{id}}",
           "refId": "A"
         }
       ],

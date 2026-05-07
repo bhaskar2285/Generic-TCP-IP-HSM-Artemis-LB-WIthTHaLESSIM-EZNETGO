@@ -1,168 +1,145 @@
-# Handoff — HSM LB Benchmarking Session
+# Handoff — HSM LB Monitoring Session
 
-Last touched: **2026-05-05**.
-Current work tree on disk: `/tmp/Generic-TCP-IP-HSM-Artemis-LB/` (clone — `master` branch tracks `origin/master`).
-Pushes have been going to `https://github.com/bhaskar2285/Generic-TCP-IP-HSM-Artemis-LB.git`.
-
-> ⚠️  The PAT `bhaskar` provided in-conversation has been used. **Rotate it before next session.**
+Last touched: **2026-05-07**.
+Work tree: `/home/xenticate/thales-artemis-lb/` — git repo, `master` branch.
+Remote: `https://github.com/bhaskar2285/Generic-TCP-IP-HSM-Artemis-LB.git`
 
 ---
 
 ## 1. Where we are
 
-**Stack is up and healthy** (as of last action):
+**Full stack running** — 17 containers up:
 
 | Container | State |
 |---|---|
-| `artemis-master` | restarted recently — was OOM-killed during a 1500 TPS run; now in `Waiting indefinitely to obtain primary lock` because **slave** holds the lock |
-| `artemis-slave` | active, serving all traffic via the failover URL |
-| `lb-1`, `lb-2` | healthy, JMS UP |
+| `artemis-master` | healthy, holds journal lock |
+| `artemis-slave` | standby |
+| `lb-1`, `lb-2` | healthy — now routing to **all 5 HSMs** |
 | `eznet-1..5` | up |
-| `hsm-sim-1..5` | up |
+| `hsm-sim-1..5` | up, Prometheus metrics on port 9100 |
+| `prometheus` | up, scraping 15 targets |
+| `grafana` | up at `http://localhost:3000` (admin/admin) |
+| `cadvisor` | up at host port 8085 |
 
-**Currently configured for 3 HSMs** (`hsm.lb.nodes` = node1+node2+node3 only). The other Go sims are running but not in the LB's routing list.
+**All 5 HSM sims now in LB rotation** — `hsm.lb.nodes` updated from 3 to 5 nodes in both lb-1 and lb-2 `application.properties`.
 
-**Locked timers** (no auto-tune):
-- `socket-timeout-ms=15000`
-- `fast-fail-timeout-ms=5000`
-- `max-wait-ms=15000`
-- `request.max-age-ms=45000`
+**Locked timers (unchanged from last session):**
+- `socket-timeout-ms=15000`, `fast-fail-timeout-ms=5000`, `max-wait-ms=15000`, `request.max-age-ms=45000`
 - `prefetch=10`, 200 consumers per LB
 - CB **disabled**, AdaptiveTuner **disabled**, virtual threads **disabled**
 
 ---
 
-## 2. Done in this session
+## 2. Done this session
 
-1. Cloned repo, deployed Artemis HA + 2 LB + 2 EZNet stack from the IMPLEMENTATION_AND_TEST_GUIDE.md
-2. Replaced the .NET Thales sim with **5 in-cluster Go sims** (`docker/hsm-sim/`)
-3. Found and fixed two real LB bugs:
-   - `pool.fast-fail-timeout-ms=5` (5 ms) — kills every multi-node retry
-   - `ThalesNodePool.send()` opened a fresh socket per request — `pool.max-total` was dead config
-4. Patched `ThalesNodePool` to actually use the existing `ThalesSocketFactory` via `GenericObjectPool<Socket>`
-5. Added clean toggles: `hsm.lb.adaptive.enabled`, `hsm.lb.circuit-breaker.enabled`, `hsm.lb.jms.virtual-threads`
-6. Wrote asyncio-based load gen (`tests/auto-tune-asyncio.sh`, `tests/auto-tune-asyncio-with-stats.sh`) — Python threading caps at ~70 TPS, asyncio sustains thousands
-7. 32-combo HSM enable/disable matrix script (`tests/combo-32-asyncio.sh`)
-8. Found ceiling stages:
-   - 100 consumers, no pool → 500 TPS
-   - 200 consumers, pool, prefetch=100 → 1000 TPS / 328 atps
-   - 200 consumers, pool, prefetch=10 → 1000 TPS / 309 atps, **lower latency**
-   - 400 consumers → regression
-   - Virtual threads → regression
-   - 3 EZNets → **2000 TPS ceiling** ← best result
-   - 5 EZNets at 1500 TPS → Artemis OOM
-9. HSM scan with 5 EZNet + locked timers: 1→200, 2→1000, 3→1000 (1500 OOMs Artemis)
-10. Added `<allow-failback>` config for Artemis HA, set 1 GB heap + 1.5 GB container limit on both brokers
+1. **Full Grafana monitoring stack** added to `docker/docker-compose.yml`:
+   - Prometheus + Grafana + cAdvisor
+   - jmx_prometheus_javaagent wired into Artemis master (port 9404) and slave (port 9405)
+   - EZNet 1..5 actuator/prometheus endpoint enabled
+   - HSM sim Go code patched to expose `/metrics` on port 9100
+   - Dashboard auto-provisioned at startup — no manual setup needed
 
-**Two commits pushed to `master`:**
-- `2dfcf08` — initial Go sim + bench scripts + report
-- `a3a2089` — pool patch + prefetch tuning + report update
+2. **Dashboard panels (5 rows):**
+   - LB Overview: req/s, error rate, avg+max latency, node health (5 bars), circuit breakers (5 bars)
+   - Artemis Brokers: queue depth, consumer counts, JVM heap
+   - EZNet Instances: JVM threads, JVM heap (summed by instance)
+   - HSM Simulators: req/s, p95/p99 latency, active connections
+   - Container Health: cAdvisor system slice CPU/mem
 
-(Work since `a3a2089` — feature toggles, eznet-3/4/5, HSM scan, broker hardening — is on disk but **not committed yet**.)
+3. **Dashboard PromQL fixes applied:**
+   - Error rate: `sum by (exported_instance)` to avoid silent NaN
+   - Latency: switched from missing `_bucket` histogram to `_sum/_count/_max` (LB uses summary not histogram)
+   - Node health/CB: `max by (node)` — deduplicates lb-1+lb-2 reporting same nodes (was 10 stats, now 5)
+   - EZNet heap: `sum by (instance)` — collapses memory pool IDs (was 40 lines, now 5)
+
+4. **cAdvisor note:** overlayfs storage driver prevents per-container `name`/`image` label population. Container row shows host system.slice cgroup metrics instead. Per-container names need `docker-stats-exporter` (registry blocked this session — `ghcr.io` denied).
+
+5. **All 5 HSMs added** to lb-1 and lb-2 `application.properties` — `node4:hsm-sim-4:9003:1,node5:hsm-sim-5:9004:1` appended.
+
+**Commits this session (master branch):**
+- `b61b16a` — jmx_prometheus_javaagent download script
+- `70fb11b` — JMX scrape rules for Artemis
+- `60985e3` — Prometheus scrape config (15 targets)
+- `7cd7255` — EZNet actuator/prometheus enabled
+- `54f7dfb` — HSM sim /metrics endpoint (Go)
+- `3a146b4` — Grafana datasource + dashboard provider provisioning
+- `5d5a88f` — Grafana dashboard JSON (5-row full stack)
+- `a2d1e79` — docker-compose: Prometheus + Grafana + cAdvisor + JMX agent
+- `db27dc3` — fix: datasource UID case, dead goroutine, unused volume
+- `4751704` — complete monitoring stack commit
+- Latest uncommitted: lb-1/lb-2 nodes→5, dashboard PromQL fixes
 
 ---
 
-## 3. Pending / didn't get to
+## 3. Pending / next priorities
 
-- (b) **5 EZNets full sweep** — initial attempt OOM-killed Artemis at 1500 TPS. With 1 GB heap on this laptop we can't safely sweep > 1000 TPS at 5 EZNets. Needs either more heap or a real Artemis cluster.
-- (c) **Active-active Artemis cluster** — would solve both the OOM ceiling and the failback-after-crash issue. Requires:
-  - Two brokers with `<cluster-connection>` config pointing at each other
-  - `<ha-policy><live-only>` instead of `<shared-store><master/slave>`
-  - LB/EZNet failover URLs with `randomize=true`
-  - Possibly a redistribution-delay setting to prevent message ping-ponging
-  - Unfinished — task #15 still open in the task list
-- **EZNet profiling** — at 140%+ CPU per container, EZNet is the per-instance bottleneck. We don't have its source (precompiled WAR). Could attach a JFR profiler to a running container if needed.
-- **Commit + push** of all the §13-17 work + the benchmark scripts that landed in `/tmp/` but not the repo (`auto-tune-asyncio-with-stats.sh`, `auto-tune-asyncio-3eznet.sh`, `auto-tune-asyncio-5eznet.sh`).
+1. **Active-active Artemis cluster** — OOM ceiling fix. Needs `<cluster-connection>` config, `<ha-policy><live-only>`, LB/EZNet failover URLs with `randomize=true`.
+2. **Auto-failback watchdog** — shell loop watching `AMQ221034` in master logs, restarts slave. Can be a simple sidecar container or supervisord script.
+3. **Container metrics fix** — replace cAdvisor with `docker-stats-exporter` (needs registry access). Image: `ghcr.io/prometheus-community/docker-exporter:latest` on port 9417.
+4. **5-EZNet full TPS sweep** — with Grafana live, now can watch queue depth + consumer counts during sweep. Artemis OOMs at 1500 TPS — keep at ≤1000 TPS or fix heap first.
+5. **EZNet profiling** — 140%+ CPU per instance, no source (precompiled WAR). Can attach JFR profiler.
 
 ---
 
 ## 4. Known issues + workarounds
 
-### 4.1 Artemis-master can't reacquire lock after OOM crash
-**Symptom:** master log shows `AMQ221034: Waiting indefinitely to obtain primary lock`.
-**Cause:** slave promoted on master crash and `<allow-failback>true` did not kick in (slave busy serving traffic, possibly a half-recovered journal).
-**Manual fix:** `docker stop artemis-slave` → wait for master to grab lock → `docker start artemis-slave` (it'll go back into standby).
-**Permanent fix:** active-active cluster (see (c) above) or a watchdog script that detects the log line and restarts the slave.
+### 4.1 Artemis-master lock after OOM crash
+**Symptom:** `AMQ221034: Waiting indefinitely to obtain primary lock`
+**Fix:** `docker stop artemis-slave && sleep 5 && docker start artemis-slave`
 
-### 4.2 docker-compose v1 on this host has the `KeyError: 'ContainerConfig'` bug
-**Symptom:** `docker-compose up -d` after running containers were modified throws `KeyError: 'ContainerConfig'` in `merge_volume_bindings`.
-**Workaround:** `docker rm -f <containers>` first, then `docker-compose up -d`. Or upgrade to docker compose v2.
+### 4.2 cAdvisor per-container metrics broken
+**Cause:** overlayfs Docker storage driver — cAdvisor can't read layerdb mounts.
+**Symptom:** Container Health row shows system.slice services, not docker container names.
+**Fix:** replace with `ghcr.io/prometheus-community/docker-exporter:latest` (port 9417). Update compose + prometheus.yml scrape target from `cadvisor:8080` to `cadvisor:9417`.
 
-### 4.3 `xlite-billpay-gateway` keeps grabbing port 9100
-**Symptom:** `eznet-1` host port 9100 conflict.
-**Workaround:** eznet-1 is permanently remapped to host port **9105**. All bench scripts use `9105,9101,9106,9107,9108`.
+### 4.3 port 8080 conflict
+**Symptom:** cAdvisor remapped to host port 8085 (local Java process holds 8080).
 
-### 4.4 host `activemq` (Classic 6.2.5) and supervisor services
-**Symptom:** they coexist with our docker stack.
-**Workaround:** the docker Artemis publishes on 61626/18163 (not 61616/8161), so no conflict. The two supervisor services that conflicted (`thales-lb`, `eznet-thales-lb-inbound`) were stopped at the start of the session. They will restart on host reboot — restart them manually if you need the old non-docker stack back, or `sudo supervisorctl stop` them again.
+### 4.4 host activemq + supervisor services
+Artemis on 61626/18163, no conflict. `thales-lb` and `eznet-thales-lb-inbound` supervisor services stopped — restart on reboot, re-stop with `sudo supervisorctl stop`.
 
-### 4.5 Artemis at 1 GB heap caps at ~1000 TPS sustained
-At 1500 TPS the broker memory hits the 1.5 GB container limit and gets OOM-killed. Choices: bigger heap (not viable on this laptop), cluster (proper solution), lower workload.
+### 4.5 Artemis at 1 GB heap caps ~1000 TPS
+OOM at 1500 TPS. Need active-active cluster or reduced load.
 
 ---
 
 ## 5. How to resume
 
 ```bash
-# 1. Pull latest
-cd /tmp/Generic-TCP-IP-HSM-Artemis-LB
-git pull origin master
+cd /home/xenticate/thales-artemis-lb/docker
 
-# 2. (If stack is down) — bring up clean
-cd docker
-docker volume rm docker_artemis-data 2>/dev/null   # only if you want a fresh broker
-docker-compose up -d
-
-# 3. Verify
+# Stack already up — verify
+docker compose ps
 curl -s http://localhost:8110/api/v1/hsm-lb/status | python3 -m json.tool
 
-# 4. Run a sweep (no auto-tune; honest numbers)
-TPS_LADDER="200 500 1000" DUR=15 NO_AUTO_TUNE=1 \
-  bash /tmp/auto-tune-asyncio-with-stats.sh
+# Open Grafana
+xdg-open http://localhost:3000   # admin / admin
 
-# 5. Run the 32-combo matrix
-TPS=300 DUR=10 bash tests/combo-32-asyncio.sh
-```
+# If stack is down — bring up
+docker compose up -d
 
-If artemis-master is stuck "Waiting indefinitely to obtain primary lock":
-```bash
-docker stop artemis-slave
-sleep 5    # let master grab the lock
-docker start artemis-slave
+# If artemis-master stuck on lock
+docker stop artemis-slave && sleep 5 && docker start artemis-slave
+
+# Run a TPS sweep (5 HSMs, 5 EZNets, watch Grafana)
+TPS_LADDER="200 500 1000" DUR=30 NO_AUTO_TUNE=1 \
+  bash tests/auto-tune-asyncio-with-stats.sh
 ```
 
 ---
 
-## 6. Next-session priorities (suggested)
-
-1. **Commit + push** the uncommitted changes (toggles, eznet-3/4/5, HSM scan results in BENCHMARK_REPORT.md §13-17, this HANDOFF.md, broker config changes).
-2. **Active-active Artemis cluster** (test c) — the right fix for the OOM ceiling.
-3. **Auto-failback watchdog** — small sidecar / shell loop that watches for `AMQ221034` in master logs and restarts slave. Document or commit as part of the deployment guide.
-4. Optional: profile EZNet to understand why it's at 140% CPU per instance — there may be cheap wins.
-5. Re-sweep at fixed best config and produce a single canonical "production-ready" benchmark table for the report.
-
----
-
-## 7. Reference: file layout in this branch
+## 6. File layout — monitoring additions
 
 | File | Status | Purpose |
 |---|---|---|
-| `BENCHMARK_REPORT.md` | committed (a3a2089) + uncommitted §13-17 | Full report |
-| `HANDOFF.md` | new in this commit | This file |
-| `docker/hsm-sim/{main.go,Dockerfile}` | committed (2dfcf08) | Go HSM sim |
-| `docker/docker-compose.yml` | committed (2dfcf08) + uncommitted (eznet-3/4/5, broker heap/limits) | Compose spec |
-| `docker/artemis/broker-master.xml` | uncommitted (`<failover-on-shutdown>true</failover-on-shutdown>`) | Master broker config |
-| `docker/artemis/broker-slave.xml` | already had `<allow-failback>true</allow-failback>` | Slave broker config |
-| `docker/config/lb-{1,2}/application.properties` | committed + uncommitted (toggles, 200 consumers, prefetch=10) | LB config |
-| `docker/config/eznet-{3,4,5}/application.properties` | uncommitted | New EZNet configs |
-| `src/main/java/.../node/ThalesNodePool.java` | committed (a3a2089) | Real socket pool |
-| `src/main/java/.../node/ThalesNode.java` | uncommitted | CB enabled flag |
-| `src/main/java/.../config/LbProperties.java` | uncommitted | adaptive/CB/VT toggles |
-| `src/main/java/.../adaptive/AdaptiveTuner.java` | uncommitted | enabled gate |
-| `src/main/java/.../jms/JmsConfig.java` | uncommitted | VT executor wiring |
-| `tests/auto-tune-asyncio.sh` | committed | Asyncio sweep + auto-tune |
-| `tests/auto-tune-asyncio-with-stats.sh` | **lives in `/tmp/` — needs copy-into-repo + commit** | Adds docker stats sampling |
-| `tests/auto-tune-asyncio-{3,5}eznet.sh` | **lives in `/tmp/` — needs copy-into-repo + commit** | Variants for 3/5 EZNets |
-| `tests/combo-32-asyncio.sh` | committed | 2^5 enable/disable matrix |
-| `tests/measure-200tps.sh` | committed | Single-step measurement |
-| `tests/test-hsm-{load,dual-lb-benchmark}.docker.sh` | committed | Patched original tests |
+| `docker/docker-compose.yml` | committed | prometheus + grafana + cadvisor + JMX agent in Artemis |
+| `docker/prometheus/prometheus.yml` | committed | 15 scrape targets |
+| `docker/prometheus/jmx-artemis.yml` | committed | Artemis JMX rules |
+| `docker/jmx-exporter/download.sh` | committed | downloads jmx_prometheus_javaagent-1.0.1.jar |
+| `docker/jmx-exporter/jmx_prometheus_javaagent-1.0.1.jar` | gitignored, on disk | mounted into Artemis containers |
+| `docker/grafana/provisioning/datasources/prometheus.yml` | committed | Prometheus datasource |
+| `docker/grafana/provisioning/dashboards/provider.yml` | committed | dashboard file provider |
+| `docker/grafana/provisioning/dashboards/hsm-lb.json` | committed + local fixes | 5-row dashboard |
+| `docker/hsm-sim/main.go` | committed | Go sim + /metrics on :9100 |
+| `docker/config/lb-{1,2}/application.properties` | **uncommitted** | nodes=5 (was 3) |
+| `docs/superpowers/plans/2026-05-07-grafana-monitoring.md` | committed | implementation plan |
