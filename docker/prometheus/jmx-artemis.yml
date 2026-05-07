@@ -1,0 +1,58 @@
+# docker/prometheus/jmx-artemis.yml
+startDelaySeconds: 10
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+
+rules:
+  # Queue message counts
+  - pattern: 'org.apache.activemq.artemis<broker="(.*)", component=addresses, address="(.*)", subcomponent=queues, routing-type="(.*)", queue="(.*)"><>MessageCount'
+    name: artemis_queue_message_count
+    labels:
+      broker: "$1"
+      address: "$2"
+      queue: "$4"
+    help: "Number of messages in queue"
+    type: GAUGE
+
+  - pattern: 'org.apache.activemq.artemis<broker="(.*)", component=addresses, address="(.*)", subcomponent=queues, routing-type="(.*)", queue="(.*)"><>MessagesAdded'
+    name: artemis_queue_messages_added_total
+    labels:
+      broker: "$1"
+      address: "$2"
+      queue: "$4"
+    help: "Total messages added to queue"
+    type: COUNTER
+
+  - pattern: 'org.apache.activemq.artemis<broker="(.*)", component=addresses, address="(.*)", subcomponent=queues, routing-type="(.*)", queue="(.*)"><>ConsumerCount'
+    name: artemis_queue_consumer_count
+    labels:
+      broker: "$1"
+      address: "$2"
+      queue: "$4"
+    help: "Number of consumers on queue"
+    type: GAUGE
+
+  # Broker-level memory
+  - pattern: 'org.apache.activemq.artemis<broker="(.*)">(AddressMemoryUsage|GlobalMaxSize|AddressMemoryUsagePercentage)'
+    name: artemis_broker_$2
+    labels:
+      broker: "$1"
+    type: GAUGE
+    lowercaseOutputName: true
+
+  # JVM heap (standard JVM beans)
+  - pattern: 'java.lang<type=Memory><HeapMemoryUsage>(used|committed|max)'
+    name: jvm_memory_heap_$1_bytes
+    type: GAUGE
+
+  - pattern: 'java.lang<type=GarbageCollector, name="(.+)">(CollectionCount|CollectionTime)'
+    name: jvm_gc_$2_total
+    labels:
+      gc: "$1"
+    type: COUNTER
+    lowercaseOutputName: true
+
+  - pattern: 'java.lang<type=Threading><>(ThreadCount|DaemonThreadCount)'
+    name: jvm_threads_$1
+    type: GAUGE
+    lowercaseOutputName: true
