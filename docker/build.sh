@@ -3,6 +3,9 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+echo "==> Ensuring JMX agent jar..."
+bash "$SCRIPT_DIR/jmx-exporter/download.sh"
+
 echo "==> Copying artifacts..."
 cp "$PROJECT_DIR/target/thales-transparent-lb.jar" "$SCRIPT_DIR/lb/thales-transparent-lb.jar"
 cp /data1/xenticate/hsm-lb/bin/eznet-tcp2jms.war "$SCRIPT_DIR/eznet/eznet-tcp2jms.war"
