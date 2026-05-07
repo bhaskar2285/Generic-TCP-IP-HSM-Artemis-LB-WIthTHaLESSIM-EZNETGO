@@ -8,7 +8,6 @@ volumes:
   lb2-logs:
   eznet1-logs:
   eznet2-logs:
-  jmx-agent: {}
 
 services:
 

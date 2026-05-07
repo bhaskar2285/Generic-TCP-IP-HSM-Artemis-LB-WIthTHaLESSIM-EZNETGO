@@ -74,8 +74,6 @@ func main() {
 		}
 	}()
 
-	go reportStats()
-
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -143,16 +141,6 @@ func handle(c net.Conn) {
 
 		reqTotal.WithLabelValues(idTag).Inc()
 		reqDuration.WithLabelValues(idTag).Observe(time.Since(start).Seconds())
-	}
-}
-
-func reportStats() {
-	prev := int64(0)
-	for range time.Tick(10 * time.Second) {
-		conns := connCount.Load()
-		log.Printf("[%s] conns=%d", idTag, conns)
-		_ = prev
-		prev = conns
 	}
 }
 
