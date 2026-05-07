@@ -1,0 +1,49 @@
+# docker/prometheus/prometheus.yml
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+
+  # LB instances — Spring Boot actuator/prometheus
+  - job_name: hsm-lb
+    static_configs:
+      - targets:
+          - lb-1:8110
+          - lb-2:8111
+    metrics_path: /actuator/prometheus
+
+  # Artemis brokers — JMX agent
+  - job_name: artemis
+    static_configs:
+      - targets:
+          - artemis-master:9404
+          - artemis-slave:9405
+
+  # EZNet instances — Spring Boot actuator/prometheus
+  - job_name: eznet
+    static_configs:
+      - targets:
+          - eznet-1:8120
+          - eznet-2:8121
+          - eznet-3:8122
+          - eznet-4:8124
+          - eznet-5:8125
+    metrics_path: /actuator/prometheus
+
+  # HSM simulators — Go prometheus endpoint
+  - job_name: hsm-sim
+    static_configs:
+      - targets:
+          - hsm-sim-1:9100
+          - hsm-sim-2:9100
+          - hsm-sim-3:9100
+          - hsm-sim-4:9100
+          - hsm-sim-5:9100
+    metrics_path: /metrics
+
+  # Container metrics via cAdvisor
+  - job_name: cadvisor
+    static_configs:
+      - targets:
+          - cadvisor:8080
