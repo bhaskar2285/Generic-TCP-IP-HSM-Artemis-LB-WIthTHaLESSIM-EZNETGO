@@ -17,22 +17,44 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
-	listenAddr = getenv("SIM_LISTEN", ":9000")
-	delayMs    = getenvInt("SIM_DELAY_MS", 0)
-	idTag      = getenv("SIM_ID", "hsm-sim")
-	connCount  atomic.Uint64
-	reqCount   atomic.Uint64
+	listenAddr  = getenv("SIM_LISTEN", ":9000")
+	metricsAddr = getenv("SIM_METRICS_LISTEN", ":9100")
+	delayMs     = getenvInt("SIM_DELAY_MS", 0)
+	idTag       = getenv("SIM_ID", "hsm-sim")
+	connCount   atomic.Int64
+)
+
+var (
+	reqTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "hsm_sim_requests_total",
+		Help: "Total HSM requests handled",
+	}, []string{"sim_id"})
+
+	reqDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "hsm_sim_request_duration_seconds",
+		Help:    "HSM request processing duration",
+		Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
+	}, []string{"sim_id"})
+
+	activeConns = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hsm_sim_active_connections",
+		Help: "Current active TCP connections",
+	}, []string{"sim_id"})
 )
 
 // Hard-coded NP body that mimics a real payShield NO reply.
-// "NP" + "00" + firmware-version-like trailer. Total reply body = 4 (header) + 22 = 26 bytes.
 var npTrailer = []byte("NP0031100007-E0000001")
 
 func main() {
@@ -40,7 +62,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("[%s] listen %s: %v", idTag, listenAddr, err)
 	}
-	log.Printf("[%s] listening on %s, latency=%dms", idTag, listenAddr, delayMs)
+	log.Printf("[%s] TCP listening on %s, latency=%dms", idTag, listenAddr, delayMs)
+
+	// Start Prometheus metrics HTTP server
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		log.Printf("[%s] metrics listening on %s", idTag, metricsAddr)
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+			log.Fatalf("[%s] metrics server: %v", idTag, err)
+		}
+	}()
 
 	go reportStats()
 
@@ -51,12 +83,17 @@ func main() {
 			continue
 		}
 		connCount.Add(1)
+		activeConns.WithLabelValues(idTag).Inc()
 		go handle(c)
 	}
 }
 
 func handle(c net.Conn) {
-	defer c.Close()
+	defer func() {
+		c.Close()
+		connCount.Add(-1)
+		activeConns.WithLabelValues(idTag).Dec()
+	}()
 	_ = c.(*net.TCPConn).SetNoDelay(true)
 
 	r := bufio.NewReaderSize(c, 4096)
@@ -64,7 +101,6 @@ func handle(c net.Conn) {
 	hdr := make([]byte, 2)
 
 	for {
-		// length prefix
 		if _, err := io.ReadFull(r, hdr); err != nil {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 				log.Printf("[%s] read hdr: %v", idTag, err)
@@ -82,9 +118,8 @@ func handle(c net.Conn) {
 			return
 		}
 
-		reqCount.Add(1)
+		start := time.Now()
 
-		// Reply body: echo client header (4) + NP + 00 + firmware trailer (22 total post-header).
 		reply := make([]byte, 4+len(npTrailer))
 		copy(reply[:4], body[:4])
 		copy(reply[4:], npTrailer)
@@ -93,7 +128,6 @@ func handle(c net.Conn) {
 			time.Sleep(time.Duration(delayMs) * time.Millisecond)
 		}
 
-		// length-prefix + reply body
 		out := make([]byte, 2+len(reply))
 		binary.BigEndian.PutUint16(out[:2], uint16(len(reply)))
 		copy(out[2:], reply)
@@ -106,16 +140,19 @@ func handle(c net.Conn) {
 			log.Printf("[%s] flush: %v", idTag, err)
 			return
 		}
+
+		reqTotal.WithLabelValues(idTag).Inc()
+		reqDuration.WithLabelValues(idTag).Observe(time.Since(start).Seconds())
 	}
 }
 
 func reportStats() {
-	prev := uint64(0)
+	prev := int64(0)
 	for range time.Tick(10 * time.Second) {
-		cur := reqCount.Load()
-		log.Printf("[%s] conns=%d total_reqs=%d (+%d in 10s = %.1f rps)",
-			idTag, connCount.Load(), cur, cur-prev, float64(cur-prev)/10.0)
-		prev = cur
+		conns := connCount.Load()
+		log.Printf("[%s] conns=%d", idTag, conns)
+		_ = prev
+		prev = conns
 	}
 }
 
@@ -125,6 +162,7 @@ func getenv(k, def string) string {
 	}
 	return def
 }
+
 func getenvInt(k string, def int) int {
 	if v := os.Getenv(k); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
