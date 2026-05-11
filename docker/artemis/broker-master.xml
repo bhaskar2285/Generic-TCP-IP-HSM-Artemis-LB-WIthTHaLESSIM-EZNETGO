@@ -5,7 +5,7 @@
                xsi:schemaLocation="urn:activemq /schema/artemis-configuration.xsd">
 
   <core xmlns="urn:activemq:core">
-    <name>artemis-master</name>
+    <name>broker-1</name>
     <persistence-enabled>true</persistence-enabled>
     <journal-type>ASYNCIO</journal-type>
     <bindings-directory>/var/lib/artemis-instance/data/bindings</bindings-directory>
@@ -13,25 +13,28 @@
     <large-messages-directory>/var/lib/artemis-instance/data/large-messages</large-messages-directory>
     <paging-directory>/var/lib/artemis-instance/data/paging</paging-directory>
 
-    <!-- Shared-store HA: master holds the file lock; slave waits.
-         failover-on-shutdown=true makes a graceful master shutdown release the lock
-         so the slave can promote without delay.
-         Failback (master taking over from slave on restart) is driven by the slave's
-         allow-failback=true in broker-slave.xml — when slave detects master alive on
-         the shared store, it shuts itself down so master can re-acquire the lock. -->
-    <ha-policy>
-      <shared-store>
-        <master>
-          <failover-on-shutdown>true</failover-on-shutdown>
-        </master>
-      </shared-store>
-    </ha-policy>
+    <!-- Active-active cluster: each broker has own journal, no shared store.
+         ON_DEMAND redistribution — messages move to peer only when consumer exists there. -->
+    <connectors>
+      <connector name="netty-connector">tcp://artemis-master:61616</connector>
+      <connector name="broker2-connector">tcp://artemis-slave:61616</connector>
+    </connectors>
+
+    <cluster-connections>
+      <cluster-connection name="hsm-cluster">
+        <connector-ref>netty-connector</connector-ref>
+        <message-load-balancing>OFF</message-load-balancing>
+        <max-hops>1</max-hops>
+        <static-connectors>
+          <connector-ref>broker2-connector</connector-ref>
+        </static-connectors>
+      </cluster-connection>
+    </cluster-connections>
 
     <acceptors>
-      <!-- OpenWire — same protocol as ActiveMQ Classic; no app code change needed -->
-      <acceptor name="openwire">tcp://0.0.0.0:61616?protocols=OPENWIRE;tcpSendBufferSize=1048576;tcpReceiveBufferSize=1048576</acceptor>
-      <!-- Artemis native for management / future use -->
+      <acceptor name="openwire">tcp://0.0.0.0:61616?protocols=CORE,OPENWIRE;tcpSendBufferSize=1048576;tcpReceiveBufferSize=1048576</acceptor>
       <acceptor name="artemis">tcp://0.0.0.0:61617?protocols=CORE</acceptor>
+      <acceptor name="amqp">tcp://0.0.0.0:61618?protocols=AMQP;anycastPrefix=queue://;multicastPrefix=topic://;tcpSendBufferSize=1048576;tcpReceiveBufferSize=1048576</acceptor>
     </acceptors>
 
     <security-enabled>false</security-enabled>
@@ -45,12 +48,30 @@
         <max-size-bytes>104857600</max-size-bytes>
         <message-counter-history-day-limit>10</message-counter-history-day-limit>
         <address-full-policy>PAGE</address-full-policy>
+        <default-address-routing-type>ANYCAST</default-address-routing-type>
       </address-setting>
     </address-settings>
 
     <addresses>
       <address name="DLQ"><anycast><queue name="DLQ"/></anycast></address>
       <address name="ExpiryQueue"><anycast><queue name="ExpiryQueue"/></anycast></address>
+      <address name="hsm.transparent.lb.in"><anycast><queue name="hsm.transparent.lb.in"/></anycast></address>
+      <address name="hsm.transparent.lb.reply"><anycast><queue name="hsm.transparent.lb.reply"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-1"><anycast><queue name="hsm-transparent-lb-inbound-1"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-2"><anycast><queue name="hsm-transparent-lb-inbound-2"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-3"><anycast><queue name="hsm-transparent-lb-inbound-3"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-4"><anycast><queue name="hsm-transparent-lb-inbound-4"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-5"><anycast><queue name="hsm-transparent-lb-inbound-5"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-go-1"><anycast><queue name="hsm-transparent-lb-inbound-go-1"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-go-2"><anycast><queue name="hsm-transparent-lb-inbound-go-2"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-go-3"><anycast><queue name="hsm-transparent-lb-inbound-go-3"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-go-4"><anycast><queue name="hsm-transparent-lb-inbound-go-4"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-go-5"><anycast><queue name="hsm-transparent-lb-inbound-go-5"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-go-6"><anycast><queue name="hsm-transparent-lb-inbound-go-6"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-go-7"><anycast><queue name="hsm-transparent-lb-inbound-go-7"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-go-8"><anycast><queue name="hsm-transparent-lb-inbound-go-8"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-go-9"><anycast><queue name="hsm-transparent-lb-inbound-go-9"/></anycast></address>
+      <address name="hsm-transparent-lb-inbound-go-10"><anycast><queue name="hsm-transparent-lb-inbound-go-10"/></anycast></address>
     </addresses>
   </core>
 </configuration>

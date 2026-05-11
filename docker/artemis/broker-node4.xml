@@ -5,7 +5,7 @@
                xsi:schemaLocation="urn:activemq /schema/artemis-configuration.xsd">
 
   <core xmlns="urn:activemq:core">
-    <name>broker-2</name>
+    <name>broker-4</name>
     <persistence-enabled>true</persistence-enabled>
     <journal-type>ASYNCIO</journal-type>
     <bindings-directory>/var/lib/artemis-instance/data/bindings</bindings-directory>
@@ -13,11 +13,11 @@
     <large-messages-directory>/var/lib/artemis-instance/data/large-messages</large-messages-directory>
     <paging-directory>/var/lib/artemis-instance/data/paging</paging-directory>
 
-    <!-- Active-active peer — own journal, no shared store.
-         Peer connector points back to broker-1. -->
     <connectors>
-      <connector name="netty-connector">tcp://artemis-slave:61616</connector>
+      <connector name="netty-connector">tcp://artemis-node4:61616</connector>
       <connector name="broker1-connector">tcp://artemis-master:61616</connector>
+      <connector name="broker2-connector">tcp://artemis-slave:61616</connector>
+      <connector name="broker3-connector">tcp://artemis-node3:61616</connector>
     </connectors>
 
     <cluster-connections>
@@ -27,6 +27,8 @@
         <max-hops>1</max-hops>
         <static-connectors>
           <connector-ref>broker1-connector</connector-ref>
+          <connector-ref>broker2-connector</connector-ref>
+          <connector-ref>broker3-connector</connector-ref>
         </static-connectors>
       </cluster-connection>
     </cluster-connections>
@@ -57,11 +59,6 @@
       <address name="ExpiryQueue"><anycast><queue name="ExpiryQueue"/></anycast></address>
       <address name="hsm.transparent.lb.in"><anycast><queue name="hsm.transparent.lb.in"/></anycast></address>
       <address name="hsm.transparent.lb.reply"><anycast><queue name="hsm.transparent.lb.reply"/></anycast></address>
-      <address name="hsm-transparent-lb-inbound-1"><anycast><queue name="hsm-transparent-lb-inbound-1"/></anycast></address>
-      <address name="hsm-transparent-lb-inbound-2"><anycast><queue name="hsm-transparent-lb-inbound-2"/></anycast></address>
-      <address name="hsm-transparent-lb-inbound-3"><anycast><queue name="hsm-transparent-lb-inbound-3"/></anycast></address>
-      <address name="hsm-transparent-lb-inbound-4"><anycast><queue name="hsm-transparent-lb-inbound-4"/></anycast></address>
-      <address name="hsm-transparent-lb-inbound-5"><anycast><queue name="hsm-transparent-lb-inbound-5"/></anycast></address>
       <address name="hsm-transparent-lb-inbound-go-1"><anycast><queue name="hsm-transparent-lb-inbound-go-1"/></anycast></address>
       <address name="hsm-transparent-lb-inbound-go-2"><anycast><queue name="hsm-transparent-lb-inbound-go-2"/></anycast></address>
       <address name="hsm-transparent-lb-inbound-go-3"><anycast><queue name="hsm-transparent-lb-inbound-go-3"/></anycast></address>

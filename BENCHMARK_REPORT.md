@@ -496,6 +496,35 @@ Three boolean toggles added to the LB (proper alternatives to the `failure-thres
 
 ---
 
+## 18. Go EZNet vs Java EZNet — Head-to-Head Comparison
+
+Tested 2026-05-09. Same stack: 5 HSM sims, 2 LBs, Artemis 1 GB heap, `mix-online` (15 commands), `DUR=30`, `prefetch=10`.
+
+| Parameter | Go EZNet | Java EZNet |
+|---|---|---|
+| **Language** | Go 1.23 | Java (Spring Boot tcp2jms) |
+| **Concurrency model** | Goroutines (1 per connection) | JMS thread pool (listeners) |
+| **500 TPS pass rate** | ✅ 100% | ❌ 56–72% FAIL |
+| **1000 TPS pass rate** | ✅ 100% | ❌ never reached |
+| **1500 TPS pass rate** | ✅ 100% | ❌ never reached |
+| **Max ceiling (≥99%)** | **2500 TPS** | **< 500 TPS** |
+| **ActTPS @ 1500 input** | **1036** | ~115 |
+| **p95 @ 1500 TPS** | **9.7 s** | N/A (failed) |
+| **CPU per instance @ 500 TPS** | ~20% | **60–86%** |
+| **CPU per instance @ 1500 TPS** | ~40% | saturated / OOM |
+| **Memory per instance** | **~12 MB** | **450–750 MB** |
+| **max-conn=2000** | Handled fine | CPU collapse |
+| **Bottleneck** | Artemis queue depth | **CPU (thread context switching)** |
+| **Config: consumers** | N/A (goroutines auto-scale) | 200 concurrent / 400 max |
+
+**Key findings:**
+- Go eznet is **8–10× more CPU efficient** and **60× less memory** per instance.
+- Java eznet is CPU-bound by thread-per-connection model — unusable above ~300 TPS on this hardware.
+- With `max-conn=2000` Go eznet handled 2500 TPS 100% pass; Java collapsed at 500 TPS with 800 consumers.
+- **Use Go EZNet for all production benchmarking and deployment.**
+
+---
+
 ## 17. Final recommendations
 
 | Area | Recommendation |

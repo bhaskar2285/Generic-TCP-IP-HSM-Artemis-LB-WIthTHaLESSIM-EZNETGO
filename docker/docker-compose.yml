@@ -3,11 +3,10 @@ networks:
     driver: bridge
 
 volumes:
-  artemis-data:        # shared journal — master holds file lock, slave waits
-  lb1-logs:
-  lb2-logs:
-  eznet1-logs:
-  eznet2-logs:
+  artemis-data-1:      # broker-1 (artemis-master)
+  artemis-data-2:      # broker-2 (artemis-slave)
+  artemis-data-3:      # broker-3 (artemis-node3)
+  artemis-data-4:      # broker-4 (artemis-node4)
 
 services:
 
@@ -21,11 +20,12 @@ services:
     networks: [hsm-net]
     ports:
       - "61626:61616"
+      - "61628:61618"
       - "18163:8161"
       - "9404:9404"
     user: root
     volumes:
-      - artemis-data:/var/lib/artemis-instance/data
+      - artemis-data-1:/var/lib/artemis-instance/data
       - ./artemis/broker-master.xml:/var/lib/artemis-instance/etc-override/broker.xml:ro
       - ./jmx-exporter/jmx_prometheus_javaagent-1.0.1.jar:/jmx/jmx_prometheus_javaagent.jar:ro
       - ./prometheus/jmx-artemis.yml:/jmx/config.yml:ro
@@ -33,9 +33,9 @@ services:
       ARTEMIS_USER: artemis
       ARTEMIS_PASSWORD: artemis
       ANONYMOUS_LOGIN: "true"
-      JAVA_ARGS: "-Xms1g -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -javaagent:/jmx/jmx_prometheus_javaagent.jar=9404:/jmx/config.yml"
-    mem_limit: 1500m
-    memswap_limit: 1500m
+      JAVA_ARGS: "-Xms3g -Xmx3g -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -javaagent:/jmx/jmx_prometheus_javaagent.jar=9404:/jmx/config.yml"
+    mem_limit: 4000m
+    memswap_limit: 4000m
     healthcheck:
       test: ["CMD-SHELL", "grep -q 'F0B0' /proc/net/tcp6 2>/dev/null || grep -q 'F0B0' /proc/net/tcp 2>/dev/null"]
       interval: 5s
@@ -53,11 +53,12 @@ services:
     networks: [hsm-net]
     ports:
       - "61627:61616"
+      - "61629:61618"
       - "18164:8161"
       - "9405:9405"
     user: root
     volumes:
-      - artemis-data:/var/lib/artemis-instance/data
+      - artemis-data-2:/var/lib/artemis-instance/data
       - ./artemis/broker-slave.xml:/var/lib/artemis-instance/etc-override/broker.xml:ro
       - ./jmx-exporter/jmx_prometheus_javaagent-1.0.1.jar:/jmx/jmx_prometheus_javaagent.jar:ro
       - ./prometheus/jmx-artemis.yml:/jmx/config.yml:ro
@@ -65,12 +66,61 @@ services:
       ARTEMIS_USER: artemis
       ARTEMIS_PASSWORD: artemis
       ANONYMOUS_LOGIN: "true"
-      JAVA_ARGS: "-Xms1g -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -javaagent:/jmx/jmx_prometheus_javaagent.jar=9405:/jmx/config.yml"
+      JAVA_ARGS: "-Xms3g -Xmx3g -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -javaagent:/jmx/jmx_prometheus_javaagent.jar=9405:/jmx/config.yml"
+    mem_limit: 4000m
+    memswap_limit: 4000m
+    restart: unless-stopped
+
+  # ── Artemis Node3 ────────────────────────────────────────────────────────
+  artemis-node3:
+    image: apache/activemq-artemis:2.38.0
+    container_name: artemis-node3
+    hostname: artemis-node3
+    networks: [hsm-net]
+    ports:
+      - "61630:61616"
+      - "61631:61618"
+      - "18165:8161"
+      - "9406:9406"
+    user: root
+    volumes:
+      - artemis-data-3:/var/lib/artemis-instance/data
+      - ./artemis/broker-node3.xml:/var/lib/artemis-instance/etc-override/broker.xml:ro
+      - ./jmx-exporter/jmx_prometheus_javaagent-1.0.1.jar:/jmx/jmx_prometheus_javaagent.jar:ro
+      - ./prometheus/jmx-artemis.yml:/jmx/config.yml:ro
+    environment:
+      ARTEMIS_USER: artemis
+      ARTEMIS_PASSWORD: artemis
+      ANONYMOUS_LOGIN: "true"
+      JAVA_ARGS: "-Xms1g -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -javaagent:/jmx/jmx_prometheus_javaagent.jar=9406:/jmx/config.yml"
     mem_limit: 1500m
     memswap_limit: 1500m
-    depends_on:
-      artemis-master:
-        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Artemis Node4 ────────────────────────────────────────────────────────
+  artemis-node4:
+    image: apache/activemq-artemis:2.38.0
+    container_name: artemis-node4
+    hostname: artemis-node4
+    networks: [hsm-net]
+    ports:
+      - "61632:61616"
+      - "61633:61618"
+      - "18166:8161"
+      - "9407:9407"
+    user: root
+    volumes:
+      - artemis-data-4:/var/lib/artemis-instance/data
+      - ./artemis/broker-node4.xml:/var/lib/artemis-instance/etc-override/broker.xml:ro
+      - ./jmx-exporter/jmx_prometheus_javaagent-1.0.1.jar:/jmx/jmx_prometheus_javaagent.jar:ro
+      - ./prometheus/jmx-artemis.yml:/jmx/config.yml:ro
+    environment:
+      ARTEMIS_USER: artemis
+      ARTEMIS_PASSWORD: artemis
+      ANONYMOUS_LOGIN: "true"
+      JAVA_ARGS: "-Xms1g -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -javaagent:/jmx/jmx_prometheus_javaagent.jar=9407:/jmx/config.yml"
+    mem_limit: 1500m
+    memswap_limit: 1500m
     restart: unless-stopped
 
   # ── LB-1 ─────────────────────────────────────────────────────────────────
@@ -86,7 +136,7 @@ services:
       - "8110:8110"
     volumes:
       - ./config/lb-1/application.properties:/config/application.properties:ro
-      - lb1-logs:/var/log/xenticate
+      - ../logs/lb-1:/logs
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -110,7 +160,7 @@ services:
       - "8111:8111"
     volumes:
       - ./config/lb-2/application.properties:/config/application.properties:ro
-      - lb2-logs:/var/log/xenticate
+      - ../logs/lb-2:/logs
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -123,6 +173,404 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+  # ── LB-3 ─────────────────────────────────────────────────────────────────
+  lb-3:
+    image: hsm-thales-lb:latest
+    container_name: lb-3
+    hostname: lb-3
+    networks: [hsm-net]
+    ports:
+      - "8112:8112"
+    volumes:
+      - ./config/lb-3/application.properties:/config/application.properties:ro
+      - ../logs/lb-3:/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q '1FB0' /proc/net/tcp6 2>/dev/null || grep -q '1FB0' /proc/net/tcp 2>/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── LB-4 (slave-pinned, round-robin balance) ──────────────────────────────
+  lb-4:
+    image: hsm-thales-lb:latest
+    container_name: lb-4
+    hostname: lb-4
+    networks: [hsm-net]
+    ports:
+      - "8113:8113"
+    volumes:
+      - ./config/lb-4/application.properties:/config/application.properties:ro
+      - ../logs/lb-4:/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q '1FB1' /proc/net/tcp6 2>/dev/null || grep -q '1FB1' /proc/net/tcp 2>/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── LB-5 (master-pinned) ─────────────────────────────────────────────────
+  lb-5:
+    image: hsm-thales-lb:latest
+    container_name: lb-5
+    hostname: lb-5
+    networks: [hsm-net]
+    ports:
+      - "8114:8114"
+    volumes:
+      - ./config/lb-5/application.properties:/config/application.properties:ro
+      - ../logs/lb-5:/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q '1FB2' /proc/net/tcp6 2>/dev/null || grep -q '1FB2' /proc/net/tcp 2>/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── LB-6 (slave-pinned) ──────────────────────────────────────────────────
+  lb-6:
+    image: hsm-thales-lb:latest
+    container_name: lb-6
+    hostname: lb-6
+    networks: [hsm-net]
+    ports:
+      - "8115:8115"
+    volumes:
+      - ./config/lb-6/application.properties:/config/application.properties:ro
+      - ../logs/lb-6:/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q '1FB3' /proc/net/tcp6 2>/dev/null || grep -q '1FB3' /proc/net/tcp 2>/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  lb-7:
+    image: hsm-thales-lb:latest
+    container_name: lb-7
+    hostname: lb-7
+    networks: [hsm-net]
+    ports: ["8116:8116"]
+    volumes:
+      - ./config/lb-7/application.properties:/config/application.properties:ro
+      - ../logs/lb-7:/logs
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on: {artemis-master: {condition: service_healthy}}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q '1FB4' /proc/net/tcp6 2>/dev/null || grep -q '1FB4' /proc/net/tcp 2>/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  lb-8:
+    image: hsm-thales-lb:latest
+    container_name: lb-8
+    hostname: lb-8
+    networks: [hsm-net]
+    ports: ["8117:8117"]
+    volumes:
+      - ./config/lb-8/application.properties:/config/application.properties:ro
+      - ../logs/lb-8:/logs
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on: {artemis-master: {condition: service_healthy}}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q '1FB5' /proc/net/tcp6 2>/dev/null || grep -q '1FB5' /proc/net/tcp 2>/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  lb-9:
+    image: hsm-thales-lb:latest
+    container_name: lb-9
+    hostname: lb-9
+    networks: [hsm-net]
+    ports: ["8118:8118"]
+    volumes:
+      - ./config/lb-9/application.properties:/config/application.properties:ro
+      - ../logs/lb-9:/logs
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on: {artemis-master: {condition: service_healthy}}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q '1FB6' /proc/net/tcp6 2>/dev/null || grep -q '1FB6' /proc/net/tcp 2>/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  lb-10:
+    image: hsm-thales-lb:latest
+    container_name: lb-10
+    hostname: lb-10
+    networks: [hsm-net]
+    ports: ["8119:8119"]
+    volumes:
+      - ./config/lb-10/application.properties:/config/application.properties:ro
+      - ../logs/lb-10:/logs
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on: {artemis-master: {condition: service_healthy}}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q '1FB7' /proc/net/tcp6 2>/dev/null || grep -q '1FB7' /proc/net/tcp 2>/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Go EZNet-1..5 (Go replacement for Java tcp2jms WAR) ─────────────────
+  # Uses AMQP 1.0 on port 61618. Same queue names as Java EZNet.
+  # Host ports 9110-9114 (TCP) + 8130-8134 (metrics) to coexist with Java EZNets.
+  go-eznet-1:
+    build:
+      context: ../../../../go-eznet
+      dockerfile: Dockerfile
+    image: go-eznet:latest
+    container_name: go-eznet-1
+    hostname: go-eznet-1
+    networks: [hsm-net]
+    ports:
+      - "9110:9100"
+      - "8130:8120"
+    command:
+      - "-tcp-port=9100"
+      - "-metrics-port=8120"
+      - "-broker=amqp://artemis-master:61618"
+      - "-broker2=amqp://artemis-slave:61618"
+      - "-self-queue=hsm-transparent-lb-inbound-go-1"
+      - "-outbound-queue=hsm.transparent.lb.in"
+      - "-max-conn=2000"
+      - "-read-timeout=30s"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  go-eznet-2:
+    image: go-eznet:latest
+    container_name: go-eznet-2
+    hostname: go-eznet-2
+    networks: [hsm-net]
+    ports:
+      - "9111:9100"
+      - "8131:8120"
+    command:
+      - "-tcp-port=9100"
+      - "-metrics-port=8120"
+      - "-broker=amqp://artemis-master:61618"
+      - "-broker2=amqp://artemis-slave:61618"
+      - "-self-queue=hsm-transparent-lb-inbound-go-2"
+      - "-outbound-queue=hsm.transparent.lb.in"
+      - "-max-conn=2000"
+      - "-read-timeout=30s"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  go-eznet-3:
+    image: go-eznet:latest
+    container_name: go-eznet-3
+    hostname: go-eznet-3
+    networks: [hsm-net]
+    ports:
+      - "9112:9100"
+      - "8132:8120"
+    command:
+      - "-tcp-port=9100"
+      - "-metrics-port=8120"
+      - "-broker=amqp://artemis-slave:61618"
+      - "-broker2=amqp://artemis-master:61618"
+      - "-self-queue=hsm-transparent-lb-inbound-go-3"
+      - "-outbound-queue=hsm.transparent.lb.in"
+      - "-max-conn=2000"
+      - "-read-timeout=30s"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  go-eznet-4:
+    image: go-eznet:latest
+    container_name: go-eznet-4
+    hostname: go-eznet-4
+    networks: [hsm-net]
+    ports:
+      - "9113:9100"
+      - "8133:8120"
+    command:
+      - "-tcp-port=9100"
+      - "-metrics-port=8120"
+      - "-broker=amqp://artemis-slave:61618"
+      - "-broker2=amqp://artemis-master:61618"
+      - "-self-queue=hsm-transparent-lb-inbound-go-4"
+      - "-outbound-queue=hsm.transparent.lb.in"
+      - "-max-conn=2000"
+      - "-read-timeout=30s"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  go-eznet-5:
+    image: go-eznet:latest
+    container_name: go-eznet-5
+    hostname: go-eznet-5
+    networks: [hsm-net]
+    ports:
+      - "9114:9100"
+      - "8134:8120"
+    command:
+      - "-tcp-port=9100"
+      - "-metrics-port=8120"
+      - "-broker=amqp://artemis-slave:61618"
+      - "-broker2=amqp://artemis-master:61618"
+      - "-self-queue=hsm-transparent-lb-inbound-go-5"
+      - "-outbound-queue=hsm.transparent.lb.in"
+      - "-max-conn=2000"
+      - "-read-timeout=30s"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  go-eznet-6:
+    image: go-eznet:latest
+    container_name: go-eznet-6
+    hostname: go-eznet-6
+    networks: [hsm-net]
+    ports:
+      - "9115:9100"
+      - "8135:8120"
+    command:
+      - "-tcp-port=9100"
+      - "-metrics-port=8120"
+      - "-broker=amqp://artemis-master:61618"
+      - "-broker2=amqp://artemis-slave:61618"
+      - "-self-queue=hsm-transparent-lb-inbound-go-6"
+      - "-outbound-queue=hsm.transparent.lb.in"
+      - "-max-conn=2000"
+      - "-read-timeout=30s"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  go-eznet-7:
+    image: go-eznet:latest
+    container_name: go-eznet-7
+    hostname: go-eznet-7
+    networks: [hsm-net]
+    ports:
+      - "9116:9100"
+      - "8136:8120"
+    command:
+      - "-tcp-port=9100"
+      - "-metrics-port=8120"
+      - "-broker=amqp://artemis-slave:61618"
+      - "-broker2=amqp://artemis-master:61618"
+      - "-self-queue=hsm-transparent-lb-inbound-go-7"
+      - "-outbound-queue=hsm.transparent.lb.in"
+      - "-max-conn=2000"
+      - "-read-timeout=30s"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  go-eznet-8:
+    image: go-eznet:latest
+    container_name: go-eznet-8
+    hostname: go-eznet-8
+    networks: [hsm-net]
+    ports:
+      - "9117:9100"
+      - "8137:8120"
+    command:
+      - "-tcp-port=9100"
+      - "-metrics-port=8120"
+      - "-broker=amqp://artemis-slave:61618"
+      - "-broker2=amqp://artemis-master:61618"
+      - "-self-queue=hsm-transparent-lb-inbound-go-8"
+      - "-outbound-queue=hsm.transparent.lb.in"
+      - "-max-conn=2000"
+      - "-read-timeout=30s"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  go-eznet-9:
+    image: go-eznet:latest
+    container_name: go-eznet-9
+    hostname: go-eznet-9
+    networks: [hsm-net]
+    ports:
+      - "9118:9100"
+      - "8138:8120"
+    command:
+      - "-tcp-port=9100"
+      - "-metrics-port=8120"
+      - "-broker=amqp://artemis-master:61618"
+      - "-broker2=amqp://artemis-master:61618"
+      - "-self-queue=hsm-transparent-lb-inbound-go-9"
+      - "-outbound-queue=hsm.transparent.lb.in"
+      - "-max-conn=2000"
+      - "-read-timeout=30s"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  go-eznet-10:
+    image: go-eznet:latest
+    container_name: go-eznet-10
+    hostname: go-eznet-10
+    networks: [hsm-net]
+    ports:
+      - "9119:9100"
+      - "8139:8120"
+    command:
+      - "-tcp-port=9100"
+      - "-metrics-port=8120"
+      - "-broker=amqp://artemis-master:61618"
+      - "-broker2=amqp://artemis-master:61618"
+      - "-self-queue=hsm-transparent-lb-inbound-go-10"
+      - "-outbound-queue=hsm.transparent.lb.in"
+      - "-max-conn=2000"
+      - "-read-timeout=30s"
+    depends_on:
+      artemis-master:
+        condition: service_healthy
+    restart: unless-stopped
 
   # ── EZNet-1 ───────────────────────────────────────────────────────────────
   eznet-1:
@@ -138,7 +586,7 @@ services:
       - "8120:8120"
     volumes:
       - ./config/eznet-1/application.properties:/eznet/config/application.properties:ro
-      - eznet1-logs:/var/log/xenticate
+      - ../logs/eznet-1:/logs
     depends_on:
       artemis-master:
         condition: service_healthy
@@ -203,7 +651,7 @@ services:
       - "8121:8121"
     volumes:
       - ./config/eznet-2/application.properties:/eznet/config/application.properties:ro
-      - eznet2-logs:/var/log/xenticate
+      - ../logs/eznet-2:/logs
     depends_on:
       artemis-master:
         condition: service_healthy
@@ -213,50 +661,46 @@ services:
   # Each listens on its own port (9000-9004) so they're individually addressable
   # both on the docker network (hsm-sim-N:900X) and on the host (19000-19004).
   hsm-sim-1:
-    build: { context: ./hsm-sim, dockerfile: Dockerfile }
-    image: hsm-sim:latest
-    container_name: hsm-sim-1
-    hostname: hsm-sim-1
-    networks: [hsm-net]
-    ports: ["19000:9000", "19100:9100"]
-    environment: { SIM_ID: hsm-sim-1, SIM_LISTEN: ":9000" }
-    restart: unless-stopped
+      image: thales-go-sim:latest
+      container_name: hsm-sim-1
+      hostname: hsm-sim-1
+      networks: [hsm-net]
+      ports:
+        - "19000:9000"
+        - "9999:9999"
+      command: ["-config", "ThalesParameters.xml", "-port", "9000", "-ui-port", "9999"]
+      restart: unless-stopped
+
   hsm-sim-2:
-    image: hsm-sim:latest
-    container_name: hsm-sim-2
-    hostname: hsm-sim-2
-    networks: [hsm-net]
-    ports: ["19001:9001", "19101:9100"]
-    environment: { SIM_ID: hsm-sim-2, SIM_LISTEN: ":9001" }
-    depends_on: [hsm-sim-1]
-    restart: unless-stopped
+      image: thales-go-sim:latest
+      container_name: hsm-sim-2
+      hostname: hsm-sim-2
+      networks: [hsm-net]
+      ports:
+        - "19001:9000"
+      command: ["-config", "ThalesParameters.xml", "-port", "9000"]
+      restart: unless-stopped
+
   hsm-sim-3:
-    image: hsm-sim:latest
-    container_name: hsm-sim-3
-    hostname: hsm-sim-3
-    networks: [hsm-net]
-    ports: ["19002:9002", "19102:9100"]
-    environment: { SIM_ID: hsm-sim-3, SIM_LISTEN: ":9002" }
-    depends_on: [hsm-sim-1]
-    restart: unless-stopped
+      image: thales-go-sim:latest
+      container_name: hsm-sim-3
+      hostname: hsm-sim-3
+      networks: [hsm-net]
+      ports:
+        - "19002:9000"
+      command: ["-config", "ThalesParameters.xml", "-port", "9000"]
+      restart: unless-stopped
+
   hsm-sim-4:
-    image: hsm-sim:latest
-    container_name: hsm-sim-4
-    hostname: hsm-sim-4
-    networks: [hsm-net]
-    ports: ["19003:9003", "19103:9100"]
-    environment: { SIM_ID: hsm-sim-4, SIM_LISTEN: ":9003" }
-    depends_on: [hsm-sim-1]
-    restart: unless-stopped
-  hsm-sim-5:
-    image: hsm-sim:latest
-    container_name: hsm-sim-5
-    hostname: hsm-sim-5
-    networks: [hsm-net]
-    ports: ["19004:9004", "19104:9100"]
-    environment: { SIM_ID: hsm-sim-5, SIM_LISTEN: ":9004" }
-    depends_on: [hsm-sim-1]
-    restart: unless-stopped
+      image: thales-go-sim:latest
+      container_name: hsm-sim-4
+      hostname: hsm-sim-4
+      networks: [hsm-net]
+      ports:
+        - "19003:9000"
+      command: ["-config", "ThalesParameters.xml", "-port", "9000"]
+      restart: unless-stopped
+
 
   # ── Prometheus ─────────────────────────────────────────────────────────────
   prometheus:
@@ -291,21 +735,14 @@ services:
       - prometheus
     restart: unless-stopped
 
-  # ── cAdvisor ───────────────────────────────────────────────────────────────
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.49.1
-    container_name: cadvisor
-    hostname: cadvisor
+  # ── Docker Stats Exporter (replaces cAdvisor) ─────────────────────────────
+  docker-stats-exporter:
+    image: wywywywy/docker_stats_exporter:latest
+    container_name: docker-stats-exporter
+    hostname: docker-stats-exporter
     networks: [hsm-net]
     ports:
-      - "8085:8080"
+      - "9487:9487"
     volumes:
-      - /:/rootfs:ro
-      - /var/run:/var/run:ro
-      - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-      - /dev/disk/:/dev/disk:ro
-    privileged: true
-    devices:
-      - /dev/kmsg
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
