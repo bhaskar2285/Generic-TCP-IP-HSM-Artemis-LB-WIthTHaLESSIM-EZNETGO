@@ -369,6 +369,9 @@ services:
       - "-outbound-queue=hsm.transparent.lb.in"
       - "-max-conn=2000"
       - "-read-timeout=30s"
+      - "-log-file=/logs/go-eznet-1.log"
+    volumes:
+      - ../logs/go-eznet-1:/logs
     depends_on:
       artemis-master:
         condition: service_healthy
@@ -391,6 +394,9 @@ services:
       - "-outbound-queue=hsm.transparent.lb.in"
       - "-max-conn=2000"
       - "-read-timeout=30s"
+      - "-log-file=/logs/go-eznet-2.log"
+    volumes:
+      - ../logs/go-eznet-2:/logs
     depends_on:
       artemis-master:
         condition: service_healthy
@@ -407,12 +413,15 @@ services:
     command:
       - "-tcp-port=9100"
       - "-metrics-port=8120"
-      - "-broker=amqp://artemis-slave:61618"
-      - "-broker2=amqp://artemis-master:61618"
+      - "-broker=amqp://artemis-master:61618"
+      - "-broker2=amqp://artemis-slave:61618"
       - "-self-queue=hsm-transparent-lb-inbound-go-3"
       - "-outbound-queue=hsm.transparent.lb.in"
       - "-max-conn=2000"
       - "-read-timeout=30s"
+      - "-log-file=/logs/go-eznet-3.log"
+    volumes:
+      - ../logs/go-eznet-3:/logs
     depends_on:
       artemis-master:
         condition: service_healthy
@@ -429,12 +438,15 @@ services:
     command:
       - "-tcp-port=9100"
       - "-metrics-port=8120"
-      - "-broker=amqp://artemis-slave:61618"
-      - "-broker2=amqp://artemis-master:61618"
+      - "-broker=amqp://artemis-master:61618"
+      - "-broker2=amqp://artemis-slave:61618"
       - "-self-queue=hsm-transparent-lb-inbound-go-4"
       - "-outbound-queue=hsm.transparent.lb.in"
       - "-max-conn=2000"
       - "-read-timeout=30s"
+      - "-log-file=/logs/go-eznet-4.log"
+    volumes:
+      - ../logs/go-eznet-4:/logs
     depends_on:
       artemis-master:
         condition: service_healthy
@@ -451,12 +463,15 @@ services:
     command:
       - "-tcp-port=9100"
       - "-metrics-port=8120"
-      - "-broker=amqp://artemis-slave:61618"
-      - "-broker2=amqp://artemis-master:61618"
+      - "-broker=amqp://artemis-master:61618"
+      - "-broker2=amqp://artemis-slave:61618"
       - "-self-queue=hsm-transparent-lb-inbound-go-5"
       - "-outbound-queue=hsm.transparent.lb.in"
       - "-max-conn=2000"
       - "-read-timeout=30s"
+      - "-log-file=/logs/go-eznet-5.log"
+    volumes:
+      - ../logs/go-eznet-5:/logs
     depends_on:
       artemis-master:
         condition: service_healthy
@@ -495,8 +510,8 @@ services:
     command:
       - "-tcp-port=9100"
       - "-metrics-port=8120"
-      - "-broker=amqp://artemis-slave:61618"
-      - "-broker2=amqp://artemis-master:61618"
+      - "-broker=amqp://artemis-master:61618"
+      - "-broker2=amqp://artemis-slave:61618"
       - "-self-queue=hsm-transparent-lb-inbound-go-7"
       - "-outbound-queue=hsm.transparent.lb.in"
       - "-max-conn=2000"

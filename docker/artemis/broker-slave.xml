@@ -39,6 +39,9 @@
 
     <security-enabled>false</security-enabled>
 
+    <!-- Scan for expired messages every 5s -->
+    <message-expiry-scan-period>5000</message-expiry-scan-period>
+
     <address-settings>
       <address-setting match="#">
         <dead-letter-address>DLQ</dead-letter-address>
@@ -49,6 +52,15 @@
         <message-counter-history-day-limit>10</message-counter-history-day-limit>
         <address-full-policy>PAGE</address-full-policy>
         <default-address-routing-type>ANYCAST</default-address-routing-type>
+      </address-setting>
+      <!-- HSM inbound queues: expire messages after 60s to prevent backlog buildup -->
+      <address-setting match="hsm.transparent.lb.in">
+        <expiry-address>ExpiryQueue</expiry-address>
+        <expiry-delay>60000</expiry-delay>
+      </address-setting>
+      <address-setting match="hsm-transparent-lb-inbound-#">
+        <expiry-address>ExpiryQueue</expiry-address>
+        <expiry-delay>60000</expiry-delay>
       </address-setting>
     </address-settings>
 
