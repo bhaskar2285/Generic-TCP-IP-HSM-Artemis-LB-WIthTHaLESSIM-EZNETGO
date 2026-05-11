@@ -9,3 +9,4 @@ target/
 .metadata/
 ${sys:LOG_PATH}/
 logs/
+docs/superpowers/
