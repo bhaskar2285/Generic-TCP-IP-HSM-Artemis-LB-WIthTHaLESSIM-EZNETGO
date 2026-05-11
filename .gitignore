@@ -7,3 +7,5 @@ target/
 .classpath
 .project
 .metadata/
+${sys:LOG_PATH}/
+logs/
